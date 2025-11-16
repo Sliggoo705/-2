@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Picross Solver MVP</title>
+  <!-- Tesseract.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+    #preview {
+      max-width: 90vw;
+      margin-top: 10px;
+    }
+    #result {
+      white-space: pre-wrap;
+      background: #f0f0f0;
+      padding: 10px;
+      margin-top: 20px;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Picross Solver MVP</h1>
+  <p>画像をアップロードすると、OCRで数字を読み取ります。</p>
+
+  <input type="file" id="imageInput" accept="image/*" />
+  <br />
+  <img id="preview" />
+
+  <div id="result"></div>
+
+  <script>
+    const input = document.getElementById('imageInput');
+    const preview = document.getElementById('preview');
+    const result = document.getElementById('result');
+
+    input.addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      // プレビュー表示
+      preview.src = URL.createObjectURL(file);
+
+      result.textContent = 'OCR処理中...';
+
+      // TesseractによるOCR
+      const { data: { text } } = await Tesseract.recognize(file, 'eng');
+
+      result.textContent = '--- OCR結果 ---\n' + text;
+    });
+  </script>
+</body>
+</html>
