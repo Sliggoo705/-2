@@ -1,150 +1,295 @@
-import cv2
-import pytesseract
-import matplotlib.pyplot as plt
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Picross OCR — Improved</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif; margin: 16px; }
+    #preview { max-width: 95vw; margin-top: 10px; border: 1px solid #ddd; }
+    #result { white-space: pre-wrap; background:#f6f6f8; padding:10px; border-radius:8px; margin-top:12px; }
+    .small { font-size: 13px; color:#555 }
+    #debugCanvas { display:block; margin-top:10px; max-width:95vw; border:1px dashed #ccc; }
+  </style>
+</head>
+<body>
+  <h1>Picross OCR — Improved</h1>
+  <p class="small">画像アップロード → グリッド除去 &amp; ヒント領域自動抽出 → OCR（数字のみ）</p>
 
-# -----------------------------
-# 高精度OCR＋ヒント抽出
-# -----------------------------
-def extract_hints_high_precision(image_path, orientation='row', invert=True):
-    img = cv2.imread(image_path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3,3), 0)
-    thresh_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
-    _, thresh = cv2.threshold(blur, 0, 255, thresh_type + cv2.THRESH_OTSU)
-    
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    rects = [cv2.boundingRect(c) for c in contours]
-    
-    # 行または列でソート
-    if orientation=='row':
-        rects = sorted(rects, key=lambda x: (x[1], x[0]))
-    else:
-        rects = sorted(rects, key=lambda x: (x[0], x[1]))
-    
-    hints = []
-    current_line = []
-    last_coord = -1000
-    for x, y, w, h in rects:
-        coord = y if orientation=='row' else x
-        if abs(coord - last_coord) > max(h,w)*1.5:
-            if current_line:
-                hints.append(current_line)
-            current_line = []
-        last_coord = coord
-        
-        digit_img = thresh[y:y+h, x:x+w]
-        digit_text = pytesseract.image_to_string(digit_img, config='--psm 10 outputbase digits').strip()
-        if digit_text.isdigit():
-            current_line.append(int(digit_text))
-    if current_line:
-        hints.append(current_line)
-    return hints
+  <input type="file" id="imageInput" accept="image/*"/>
+  <br/>
+  <img id="preview" crossorigin="anonymous" />
+  <canvas id="debugCanvas"></canvas>
+  <div id="result">結果がここに表示されます。</div>
 
-# -----------------------------
-# OCR補正
-# -----------------------------
-def preprocess_ocr_hints(raw_hints, max_size):
-    processed = []
-    for hints in raw_hints:
-        hints = [h for h in hints if h != 0]
-        total = sum(hints) + len(hints)-1
-        if total > max_size:
-            scale = max_size / total
-            hints = [max(1, round(h*scale)) for h in hints]
-        processed.append(hints)
-    return processed
+<script>
+/*
+ 改良版ワークフロー（概要）
+ 1) 画像をCanvasで2倍に拡大してグレースケール化／二値化
+ 2) 横・縦プロジェクションで「罫線（グリッド）」を検出し消す（白で塗る）
+ 3) 上部（列ヒント領域）・左部（行ヒント領域）を自動推定して切り出す
+ 4) 切り出し領域を更に縦/横ごとにクラスタ検出（各グループ単位に切り分け）
+ 5) 各クラスタを個別CanvasでOCR（数字のみ許可）。列ヒントは必要に応じて90度回転して縦読み対応。
+ 6) 結果を配列化して画面に表示
+*/
 
-# -----------------------------
-# 完全解探索関数
-# -----------------------------
-def generate_line_possibilities(length, hints):
-    if not hints:
-        return [[0]*length]
-    total_blocks = sum(hints) + len(hints)-1
-    if total_blocks > length:
-        return []
+const input = document.getElementById('imageInput');
+const preview = document.getElementById('preview');
+const debugCanvas = document.getElementById('debugCanvas');
+const resultDiv = document.getElementById('result');
 
-    spaces = length - sum(hints)
-    def distribute_spaces(spaces, n):
-        if n == 1:
-            yield [spaces]
-        else:
-            for i in range(spaces+1):
-                for rest in distribute_spaces(spaces-i, n-1):
-                    yield [i] + rest
+function createCanvas(w,h){
+  const c = document.createElement('canvas'); c.width=w; c.height=h; return c;
+}
 
-    possibilities = []
-    for distribution in distribute_spaces(spaces, len(hints)+1):
-        line = []
-        for pre, block in zip(distribution, hints + [0]):
-            line.extend([0]*pre)
-            line.extend([1]*block)
-        line = line[:length]
-        possibilities.append(line)
-    return possibilities
+// 画像前処理：拡大・グレースケール・二値化
+function preprocess(img, scale=2, thresh=180){
+  const canvas = createCanvas(img.width*scale, img.height*scale);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img,0,0,canvas.width,canvas.height);
+  const im = ctx.getImageData(0,0,canvas.width,canvas.height);
+  const d = im.data;
+  for(let i=0;i<d.length;i+=4){
+    const avg = (d[i]+d[i+1]+d[i+2])/3;
+    const v = avg > thresh ? 255 : 0;
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(im,0,0);
+  return canvas;
+}
 
-def is_valid(solution, col_possibilities):
-    for c_idx, col_opts in enumerate(col_possibilities):
-        col_so_far = [row[c_idx] for row in solution]
-        if not any(opt[:len(col_so_far)] == col_so_far for opt in col_opts):
-            return False
-    return True
+// 投影（水平・垂直）を計算して配列を返す（0=白、高い値=黒成分多）
+function projection(canvas){
+  const ctx = canvas.getContext('2d');
+  const w=canvas.width,h=canvas.height;
+  const im = ctx.getImageData(0,0,w,h).data;
+  const row = new Uint32Array(h);
+  const col = new Uint32Array(w);
+  for(let y=0;y<h;y++){
+    let sum=0;
+    for(let x=0;x<w;x++){
+      const i = (y*w+x)*4;
+      // 白なら255 -> black if 0 ; since we binarized, check <=128
+      const pix = im[i]; // r
+      if(pix < 128){ sum++; col[x]++; }
+    }
+    row[y]=sum;
+  }
+  // col computed inside loop
+  return {row, col, w, h};
+}
 
-def solve_nonogram_bt(row_hints, col_hints):
-    rows, cols = len(row_hints), len(col_hints)
-    row_possibilities = [generate_line_possibilities(cols, h) for h in row_hints]
-    col_possibilities = [generate_line_possibilities(rows, h) for h in col_hints]
+// 線（罫線）を検出し白で消す。閾値は画像サイズに応じて自動計算
+function removeGridLines(canvas){
+  const ctx=canvas.getContext('2d');
+  const {row, col, w, h} = projection(canvas);
+  const rowMax = Math.max(...row);
+  const colMax = Math.max(...col);
+  // 線はその方向のプロジェクションでピークになるので閾値を割り当て
+  const rowThresh = Math.max(3, Math.floor(rowMax*0.5));
+  const colThresh = Math.max(3, Math.floor(colMax*0.5));
 
-    solution = []
-    def backtrack(r):
-        if r == rows:
-            return True
-        for possibility in row_possibilities[r]:
-            solution.append(possibility)
-            if is_valid(solution, col_possibilities):
-                if backtrack(r+1):
-                    return True
-            solution.pop()
-        return False
+  // 消す領域サイズ（周辺の太さ）
+  const lineHalf=2;
 
-    if backtrack(0):
-        return solution
-    else:
-        return None
+  // horizontal lines
+  for(let y=0;y<h;y++){
+    if(row[y] >= rowThresh){
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, y-lineHalf, w, lineHalf*2+1);
+    }
+  }
+  // vertical lines
+  for(let x=0;x<w;x++){
+    if(col[x] >= colThresh){
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(x-lineHalf, 0, lineHalf*2+1, h);
+    }
+  }
+  return canvas;
+}
 
-# -----------------------------
-# 可視化
-# -----------------------------
-def visualize_solution(solution):
-    plt.figure(figsize=(6,6))
-    plt.imshow(solution, cmap='Greys', interpolation='none')
-    plt.xticks(range(len(solution[0])))
-    plt.yticks(range(len(solution)))
-    plt.gca().invert_yaxis()
-    plt.show()
+// クラスタ検出（1次元配列の連続した黒の区間を得る）
+function findClusters(proj, minGap=2){
+  const clusters=[];
+  let inCluster=false, start=0;
+  for(let i=0;i<proj.length;i++){
+    if(proj[i] > 0 && !inCluster){
+      inCluster=true; start=i;
+    } else if(proj[i] === 0 && inCluster){
+      inCluster=false; clusters.push([start,i-1]);
+    }
+  }
+  if(inCluster) clusters.push([start, proj.length-1]);
+  // filter small clusters (noise)
+  return clusters.filter(c => (c[1]-c[0]+1) > Math.max(2,minGap));
+}
 
-# -----------------------------
-# 実行例
-# -----------------------------
-if __name__ == "__main__":
-    # 画像パス
-    image_row_path = "row_hints_image.png"
-    image_col_path = "col_hints_image.png"
-    size = 15  # マス数
+// 列ヒント領域（上）と行ヒント領域（左）を推定して切り出す
+function estimateAndSlice(canvas){
+  const {row, col, w, h} = projection(canvas);
+  // 列ヒント領域：上からの最初の黒のブロックの高さを取得（例えばトップの黒行群）
+  const topClusters = findClusters(row);
+  // 左領域：左からの最初の黒のブロックの幅
+  const leftClusters = findClusters(col);
+  // Heuristic: top cluster at top ; left cluster at left
+  const topHeight = topClusters.length ? topClusters[0][1] + 4 : Math.round(h*0.18);
+  const leftWidth = leftClusters.length ? leftClusters[0][1] + 4 : Math.round(w*0.18);
 
-    # 高精度OCRでヒント抽出
-    ocr_row_hints = extract_hints_high_precision(image_row_path, 'row')
-    ocr_col_hints = extract_hints_high_precision(image_col_path, 'col')
+  // safety clamp
+  const topH = Math.min(Math.max(10, topHeight), Math.round(h*0.5));
+  const leftW = Math.min(Math.max(10, leftWidth), Math.round(w*0.5));
 
-    # サイズに合わせて補正
-    row_hints = preprocess_ocr_hints(ocr_row_hints, size)
-    col_hints = preprocess_ocr_hints(ocr_col_hints, size)
+  const ctx = canvas.getContext('2d');
 
-    # 完全解探索
-    solution = solve_nonogram_bt(row_hints, col_hints)
+  const topCanvas = createCanvas(w, topH);
+  topCanvas.getContext('2d').drawImage(canvas, 0, 0, w, topH, 0, 0, w, topH);
 
-    # 可視化
-    if solution:
-        visualize_solution(solution)
-    else:
-        print("解は見つかりませんでした")
+  const leftCanvas = createCanvas(leftW, h - topH);
+  leftCanvas.getContext('2d').drawImage(canvas, 0, topH, leftW, h-topH, 0, 0, leftW, h-topH);
+
+  const gridCanvas = createCanvas(w-leftW, h-topH);
+  gridCanvas.getContext('2d').drawImage(canvas, leftW, topH, w-leftW, h-topH, 0, 0, w-leftW, h-topH);
+
+  return {topCanvas, leftCanvas, gridCanvas, topH, leftW};
+}
+
+// 1次元投影から各列（上ヒントの）または各行（左ヒントの）クラスタごとに切り出す
+function sliceHintsArea(areaCanvas, vertical=false){
+  const ctx = areaCanvas.getContext('2d');
+  const w = areaCanvas.width, h = areaCanvas.height;
+  const im = ctx.getImageData(0,0,w,h).data;
+  const proj = vertical ? new Uint32Array(w) : new Uint32Array(h);
+  if(vertical){
+    for(let x=0;x<w;x++){
+      let s=0;
+      for(let y=0;y<h;y++){ if(im[(y*w+x)*4] < 128) s++; }
+      proj[x]=s;
+    }
+  } else {
+    for(let y=0;y<h;y++){
+      let s=0;
+      for(let x=0;x<w;x++){ if(im[(y*w+x)*4] < 128) s++; }
+      proj[y]=s;
+    }
+  }
+  const clusters = findClusters(proj, 2);
+  // map to bounding boxes
+  const boxes = clusters.map(c=>{
+    if(vertical) return {x:c[0], y:0, w:c[1]-c[0]+1, h:h};
+    else return {x:0, y:c[0], w:w, h:c[1]-c[0]+1};
+  });
+  return boxes;
+}
+
+// OCR helper: accepts a canvas; options to whitelist digits and optionally rotate
+async function ocrCanvas(canvas, rotate=false){
+  // optionally rotate into new canvas
+  let target = canvas;
+  if(rotate){
+    const c = createCanvas(canvas.height, canvas.width);
+    const ctx = c.getContext('2d');
+    ctx.translate(c.width/2, c.height/2);
+    ctx.rotate(Math.PI/2);
+    ctx.drawImage(canvas, -canvas.width/2, -canvas.height/2);
+    target = c;
+  }
+  // small padding + scale to help OCR
+  const scaled = createCanvas(target.width*1.5, target.height*1.5);
+  scaled.getContext('2d').drawImage(target,0,0,scaled.width,scaled.height);
+
+  // Tesseract: use digits whitelist and set psm to single-line/word
+  const config = {
+    tessedit_char_whitelist: '0123456789',
+    // psm 7 = treat image as a single text line; try 6/7 as needed
+    tessedit_pageseg_mode: '7'
+  };
+
+  try {
+    const res = await Tesseract.recognize(scaled, 'eng', { tessedit_char_whitelist: config.tessedit_char_whitelist, tessedit_pageseg_mode: config.tessedit_pageseg_mode });
+    const txt = res?.data?.text || '';
+    return txt.replace(/[^\d]/g,'').trim(); // keep only digits
+  } catch(e){
+    console.error('OCR error', e);
+    return '';
+  }
+}
+
+// 主処理：画像を受け取り、ヒント配列を抽出して表示
+input.addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  if(!file) return;
+  resultDiv.textContent = '画像読み込み中…';
+  preview.src = URL.createObjectURL(file);
+
+  preview.onload = async () => {
+    try {
+      resultDiv.textContent = '前処理（白黒化）中…';
+      let canvas = preprocess(preview, 2, 180);
+      // debug show
+      debugCanvas.width = canvas.width; debugCanvas.height = canvas.height;
+      debugCanvas.getContext('2d').drawImage(canvas,0,0);
+
+      resultDiv.textContent = 'グリッド検出・除去中…';
+      canvas = removeGridLines(canvas);
+      // debug show after grid removed
+      debugCanvas.getContext('2d').clearRect(0,0,debugCanvas.width,debugCanvas.height);
+      debugCanvas.getContext('2d').drawImage(canvas,0,0);
+
+      resultDiv.textContent = '領域を推定しています…';
+      const {topCanvas, leftCanvas, gridCanvas, topH, leftW} = estimateAndSlice(canvas);
+
+      // debug small previews
+      // draw top and left in debug area (stack)
+      const dbg = debugCanvas.getContext('2d');
+      dbg.fillStyle='rgba(255,255,255,0.9)';
+      dbg.fillRect(0, canvas.height+10, debugCanvas.width, 120);
+      // (we won't draw those here to keep it simple)
+
+      resultDiv.textContent = '上（列ヒント）を分割してOCRします…';
+      // top: vertical slicing (columns)
+      const topBoxes = sliceHintsArea(topCanvas, true);
+      const colHints = [];
+      for(let i=0;i<topBoxes.length;i++){
+        const b = topBoxes[i];
+        const c = createCanvas(b.w, b.h);
+        c.getContext('2d').drawImage(topCanvas, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+        // rotate because numbers may be vertical; try both if empty
+        let txt = await ocrCanvas(c, false);
+        if(!txt) txt = await ocrCanvas(c, true);
+        // if multiple digits stacked vertically, OCR returns concat; we reverse order for top->bottom -> left->right mapping
+        // break digits into array of single-digit strings
+        const arr = txt.split('').filter(s=>s).map(s=>parseInt(s,10));
+        // If we rotated, the order might be top->bottom; keep as-is
+        colHints.push(arr.length?arr:[]);
+      }
+
+      resultDiv.textContent = '左（行ヒント）を分割してOCRします…';
+      // left: horizontal slicing (rows)
+      const leftBoxes = sliceHintsArea(leftCanvas, false);
+      const rowHints = [];
+      for(let i=0;i<leftBoxes.length;i++){
+        const b = leftBoxes[i];
+        const c = createCanvas(b.w, b.h);
+        c.getContext('2d').drawImage(leftCanvas, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+        const txt = await ocrCanvas(c, false);
+        const arr = txt.split('').filter(s=>s).map(s=>parseInt(s,10));
+        rowHints.push(arr.length?arr:[]);
+      }
+
+      // Trim leading/trailing empty groups and attempt to align row/col counts
+      const filteredCols = colHints.filter(g=>g.length>0);
+      const filteredRows = rowHints.filter(g=>g.length>0);
+
+      resultDiv.textContent = '抽出完了。\n列ヒント（上）:\n' + JSON.stringify(filteredCols) + '\n\n行ヒント（左）:\n' + JSON.stringify(filteredRows);
+
+    } catch(err){
+      console.error(err);
+      resultDiv.textContent = '処理中にエラーが発生しました: ' + err;
+    }
+  };
+});
+</script>
+</body>
+</html>
