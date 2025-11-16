@@ -3,71 +3,57 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Picross OCR + Solver (Grid-based)</title>
+  <title>Picross OCR → Grouped Hints (Auto)</title>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif; margin: 16px; }
-    #preview { max-width: 95vw; margin-top:8px; border:1px solid #ddd; display:block; }
-    #debugCanvas, #resultCanvas { border:1px dashed #bbb; margin-top:10px; max-width:95vw; }
-    .controls { margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .small { font-size:13px; color:#444; }
-    #result { white-space: pre-wrap; background:#fbfbfd; padding:10px; border-radius:8px; margin-top:12px; }
+    body{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue","Hiragino Kaku Gothic ProN","Meiryo",sans-serif;margin:16px}
+    #preview,#debugCanvas{max-width:95vw;border:1px solid #ccc;margin-top:10px;display:block}
+    #out{white-space:pre-wrap;background:#fbfbfd;padding:10px;border-radius:8px;margin-top:12px}
+    .small{font-size:13px;color:#444}
+    .controls{margin-top:8px}
   </style>
 </head>
 <body>
-  <h1>Picross OCR + Solver</h1>
-  <p class="small">Upload a picross puzzle image (with grid). Grid is detected and only the hint regions are OCRed. Then solver finds one valid solution and displays it.</p>
+  <h2>Picross OCR — Auto grouped hints → JSON rows/cols</h2>
+  <p class="small">Upload puzzle image with grid. The script auto-detects the grid, reads only hint regions, groups digits per hint, and outputs JSON arrays.</p>
 
-  <input type="file" id="imageInput" accept="image/*" />
+  <input type="file" id="imgInput" accept="image/*">
   <img id="preview" crossorigin="anonymous" />
-  <div class="controls">
-    <label class="small">Binarize threshold: <input id="thr" type="range" min="100" max="230" value="180" /></label>
-    <label class="small">Scale: <input id="scale" type="range" min="1" max="4" value="2" step="0.5" /></label>
-    <label class="small">Grid remove width: <input id="lineHalf" type="range" min="0" max="4" value="1" /></label>
-    <button id="runBtn">OCR → Solve</button>
-    <button id="showDebug">Toggle Debug</button>
+  <div class="controls small">
+    <label>Scale: <input id="scale" type="range" min="1" max="4" value="2" step="0.5"></label>
+    <label>Threshold: <input id="thr" type="range" min="100" max="230" value="180"></label>
+    <label>Grid erase width: <input id="lineHalf" type="range" min="0" max="4" value="1"></label>
+    <button id="run">Run OCR & Group</button>
+    <button id="toggleDebug">Toggle Debug</button>
   </div>
 
   <canvas id="debugCanvas" style="display:none"></canvas>
-  <div id="result">結果がここに表示されます。</div>
-  <canvas id="resultCanvas" style="display:none"></canvas>
+  <pre id="out">結果はここに表示されます（JSON）。</pre>
 
 <script>
-/* 全体フロー
- 1. 画像読み込み
- 2. 前処理（拡大・白黒化）
- 3. グリッド検出（black-line density）
- 4. 盤面領域を境に上＝列ヒント、左＝行ヒントを切り出し
- 5. 行ヒントは横にブロック分割→各ブロックを個別OCR（数字を1つずつに分割）
- 6. 列ヒントは縦にブロック分割→各ブロックを水平クラスタで分割→各クラスタ個別OCR（縦読み）
- 7. JS solver（行可能性列可能性を列挙→バックトラック）
- 8. 可視化
-*/
-
-const input = document.getElementById('imageInput');
+/* Fully automatic: detect grid, cut top/left hint areas, cluster-by-space, OCR per-cluster -> rows & cols arrays */
+const imgInput = document.getElementById('imgInput');
 const preview = document.getElementById('preview');
 const debugCanvas = document.getElementById('debugCanvas');
-const resultDiv = document.getElementById('result');
-const resultCanvas = document.getElementById('resultCanvas');
-const runBtn = document.getElementById('runBtn');
-const showDebugBtn = document.getElementById('showDebug');
-
-const thrControl = document.getElementById('thr');
+const out = document.getElementById('out');
+const runBtn = document.getElementById('run');
+const toggleDebug = document.getElementById('toggleDebug');
 const scaleControl = document.getElementById('scale');
+const thrControl = document.getElementById('thr');
 const lineHalfControl = document.getElementById('lineHalf');
 
 let lastImage = null;
 
-// helper
 function makeCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
-function cropCanvas(src, x,y,w,h){ const c = makeCanvas(w,h); c.getContext('2d').drawImage(src, x,y,w,h, 0,0,w,h); return c; }
+function cropCanvas(src,x,y,w,h){ const c=makeCanvas(w,h); c.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h); return c; }
 
-// 前処理：拡大＋2値化
+// preprocess: scale & binarize
 function preprocess(img, scale=2, thresh=180){
-  const canvas = makeCanvas(Math.round(img.width*scale), Math.round(img.height*scale));
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  const im = ctx.getImageData(0,0,canvas.width,canvas.height);
+  const cw = Math.round(img.width*scale), ch = Math.round(img.height*scale);
+  const c = makeCanvas(cw,ch);
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img,0,0,cw,ch);
+  const im = ctx.getImageData(0,0,cw,ch);
   const d = im.data;
   for(let i=0;i<d.length;i+=4){
     const g = (d[i]+d[i+1]+d[i+2])/3;
@@ -75,51 +61,43 @@ function preprocess(img, scale=2, thresh=180){
     d[i]=d[i+1]=d[i+2]=v;
   }
   ctx.putImageData(im,0,0);
-  return canvas;
+  return c;
 }
 
-// 投影（黒画素数）
-function projection(canvas){
+// projection counts of black pixels
+function projectionCounts(canvas){
   const ctx = canvas.getContext('2d'); const w=canvas.width, h=canvas.height;
   const data = ctx.getImageData(0,0,w,h).data;
   const row = new Uint32Array(h), col = new Uint32Array(w);
   for(let y=0;y<h;y++){
     for(let x=0;x<w;x++){
-      const idx=(y*w+x)*4;
+      const idx = (y*w+x)*4;
       if(data[idx] < 128){ row[y]++; col[x]++; }
     }
   }
-  return {row, col, w, h};
+  return {row,col,w,h};
 }
 
-// グリッド検出（線密度ピーク）→盤面囲いのtop/left/bottom/right を返す
-function detectGridBounds(binCanvas){
-  const {row, col, w, h} = projection(binCanvas);
-  // find peaks > 60% of max
+// detect grid bounds (top/bottom/left/right) using strong peaks
+function detectGridBounds(bin){
+  const {row,col,w,h} = projectionCounts(bin);
   const rowMax = Math.max(...row), colMax = Math.max(...col);
-  const rowThresh = Math.max(1, Math.floor(rowMax*0.6));
-  const colThresh = Math.max(1, Math.floor(colMax*0.6));
-
-  const rowLines = [];
-  for(let y=0;y<h;y++) if(row[y] >= rowThresh) rowLines.push(y);
-  const colLines = [];
-  for(let x=0;x<w;x++) if(col[x] >= colThresh) colLines.push(x);
-
-  if(rowLines.length < 2 || colLines.length < 2){
-    return null; // grid not confidently found
-  }
+  const rowThresh = Math.max(1, Math.floor(rowMax * 0.6));
+  const colThresh = Math.max(1, Math.floor(colMax * 0.6));
+  const rowLines = []; for(let y=0;y<h;y++) if(row[y] >= rowThresh) rowLines.push(y);
+  const colLines = []; for(let x=0;x<w;x++) if(col[x] >= colThresh) colLines.push(x);
+  if(rowLines.length < 2 || colLines.length < 2) return null;
   const top = rowLines[0], bottom = rowLines[rowLines.length-1];
   const left = colLines[0], right = colLines[colLines.length-1];
-  // estimate cell size by median gap
+  // estimate cell sizes
   const rowGaps = []; for(let i=1;i<rowLines.length;i++) rowGaps.push(rowLines[i]-rowLines[i-1]);
   const colGaps = []; for(let i=1;i<colLines.length;i++) colGaps.push(colLines[i]-colLines[i-1]);
-  const cellH = Math.round(median(rowGaps));
-  const cellW = Math.round(median(colGaps));
-  return {top, bottom, left, right, rowLines, colLines, cellH, cellW, w, h};
+  const cellH = median(rowGaps), cellW = median(colGaps);
+  return {top,bottom,left,right,rowLines,colLines,cellH,cellW,w,h};
 }
-function median(arr){ if(arr.length===0) return 0; const s=arr.slice().sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2? s[m] : Math.round((s[m-1]+s[m])/2); }
+function median(a){ if(!a||a.length===0) return 0; const s = a.slice().sort((x,y)=>x-y); const m=Math.floor(s.length/2); return s.length%2? s[m] : Math.round((s[m-1]+s[m])/2); }
 
-// 1次元クラスタ（連続黒領域）
+// 1D cluster detection on projection array
 function findClusters1D(proj, minSize=2){
   const clusters=[]; let inC=false, start=0;
   for(let i=0;i<proj.length;i++){
@@ -130,315 +108,193 @@ function findClusters1D(proj, minSize=2){
   return clusters.filter(c => (c[1]-c[0]+1) >= minSize);
 }
 
-// OCR helper (single small canvas). Optionally rotate 90deg.
-async function ocrCanvasSingle(c, rotate=false){
-  let target = c;
-  if(rotate){
-    const cc = makeCanvas(c.height, c.width);
-    const ctx = cc.getContext('2d');
-    ctx.translate(cc.width/2, cc.height/2);
-    ctx.rotate(Math.PI/2);
-    ctx.drawImage(c, -c.width/2, -c.height/2);
-    target = cc;
-  }
-  // scale a bit
-  const s = makeCanvas(Math.max(8, Math.round(target.width*1.5)), Math.max(8, Math.round(target.height*1.5)));
-  s.getContext('2d').drawImage(target,0,0,s.width,s.height);
+// OCR for one small canvas, tries rotation fallback
+async function ocrSmallCanvas(c, rotateIfEmpty=true){
+  // scale a bit to help recognition
+  const s = makeCanvas(Math.max(8, Math.round(c.width*1.6)), Math.max(8, Math.round(c.height*1.6)));
+  s.getContext('2d').drawImage(c,0,0,s.width,s.height);
   try{
     const res = await Tesseract.recognize(s, 'eng', { tessedit_char_whitelist:'0123456789', tessedit_pageseg_mode:'7' });
-    return (res?.data?.text || '').replace(/[^\d]/g, '').trim();
+    let txt = (res?.data?.text || '').replace(/[^\d]/g,'').trim();
+    if(!txt && rotateIfEmpty){
+      // rotate 90 deg and retry
+      const r = makeCanvas(s.height, s.width);
+      const ctx = r.getContext('2d');
+      ctx.translate(r.width/2, r.height/2);
+      ctx.rotate(Math.PI/2);
+      ctx.drawImage(s, -s.width/2, -s.height/2);
+      const res2 = await Tesseract.recognize(r, 'eng', { tessedit_char_whitelist:'0123456789', tessedit_pageseg_mode:'7' });
+      txt = (res2?.data?.text || '').replace(/[^\d]/g,'').trim();
+    }
+    return txt;
   }catch(e){
-    console.error('OCR error',e);
+    console.error('OCR err',e);
     return '';
   }
 }
 
-// 切り出し：行ヒント領域を横方向にブロック分割（左領域 -> row hints）
-function sliceRowHintBlocks(leftCanvas){
+/* --- Core grouping routines ---
+   - For left area (row hints): find horizontal bands, then within each band split by vertical gaps -> each piece = one number (may be multi-digit)
+   - For top area (col hints): find vertical blocks, then within each block split by horizontal gaps -> each piece = one number (may be multi-digit) ; rotate if needed for OCR reading
+*/
+
+// slice left (row hints) into rows of digit canvases (left->right order)
+function sliceLeftIntoRowDigitCanvases(leftCanvas){
   const ctx = leftCanvas.getContext('2d'); const w=leftCanvas.width, h=leftCanvas.height;
   const data = ctx.getImageData(0,0,w,h).data;
-  const proj = new Uint32Array(h);
-  for(let y=0;y<h;y++){ let s=0; for(let x=0;x<w;x++){ if(data[(y*w+x)*4] < 128) s++; } proj[y]=s; }
-  const clusters = findClusters1D(proj, 2);
-  // each cluster is a horizontal band; within it, we need to horizontally split digits
-  const blocks = clusters.map(([sy,ey]) => cropCanvas(leftCanvas, 0, sy, w, ey-sy+1));
-  // For each band, split horizontally into digit segments
+  const rowProj = new Uint32Array(h);
+  for(let y=0;y<h;y++){ let s=0; for(let x=0;x<w;x++){ if(data[(y*w+x)*4] < 128) s++; } rowProj[y]=s; }
+  const rowBands = findClusters1D(rowProj, 2); // horizontal bands -> each corresponds to one puzzle row hint line (may contain multiple numbers)
   const rows = [];
-  for(const band of blocks){
-    const bw=band.width, bh=band.height;
-    const bctx = band.getContext('2d'); const bdata = bctx.getImageData(0,0,bw,bh).data;
+  for(const [sy,ey] of rowBands){
+    const band = cropCanvas(leftCanvas, 0, sy, w, ey - sy + 1);
+    // within band split vertically
+    const bctx = band.getContext('2d'); const bw=band.width, bh=band.height;
     const colProj = new Uint32Array(bw);
-    for(let x=0;x<bw;x++){ let s=0; for(let y=0;y<bh;y++){ if(bdata[(y*bw+x)*4] < 128) s++; } colProj[x]=s; }
+    for(let x=0;x<bw;x++){ let s=0; for(let y=0;y<bh;y++){ if(bctx.getImageData(x,y,1,1).data[0] < 128) s++; } colProj[x]=s; }
     const colClusters = findClusters1D(colProj, 1);
-    const digits = [];
+    const digitCanvases = [];
     for(const [sx,ex] of colClusters){
-      const cw = ex - sx + 1;
-      const cc = cropCanvas(band, sx, 0, cw, bh);
-      digits.push(cc);
+      // small padding
+      const pad = 2;
+      const x0 = Math.max(0, sx - pad); const w0 = Math.min(bw - x0, ex - sx + 1 + pad*2);
+      const c = cropCanvas(band, x0, 0, w0, bh);
+      digitCanvases.push(c);
     }
-    rows.push(digits); // array of canvases for this row's digits (left->right order)
+    rows.push(digitCanvases); // array of canvases left->right
   }
-  return rows; // array of [ [canvas,canvas,...], ... ]
+  return rows;
 }
 
-// 切り出し：列ヒント領域を縦方向にブロック分割（topCanvas -> column hints)
-function sliceColHintBlocks(topCanvas){
+// slice top (col hints) into columns of digit canvases (top->bottom order)
+function sliceTopIntoColDigitCanvases(topCanvas){
   const ctx = topCanvas.getContext('2d'); const w=topCanvas.width, h=topCanvas.height;
   const data = ctx.getImageData(0,0,w,h).data;
-  const proj = new Uint32Array(w);
-  for(let x=0;x<w;x++){ let s=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4] < 128) s++; } proj[x]=s; }
-  const clusters = findClusters1D(proj, 2);
-  const blocks = clusters.map(([sx,ex]) => cropCanvas(topCanvas, sx, 0, ex-sx+1, h));
-  // For each block (one column's hint stack), split vertically into digit canvases (top->bottom)
+  const colProj = new Uint32Array(w);
+  for(let x=0;x<w;x++){ let s=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4] < 128) s++; } colProj[x]=s; }
+  const colBands = findClusters1D(colProj, 2); // vertical bands -> each corresponds to one puzzle column hint stack
   const cols = [];
-  for(const blk of blocks){
-    const bw = blk.width, bh = blk.height;
-    const bctx = blk.getContext('2d'); const bdata = bctx.getImageData(0,0,bw,bh).data;
+  for(const [sx,ex] of colBands){
+    const band = cropCanvas(topCanvas, sx, 0, ex - sx + 1, h);
+    // within band split vertically (top->bottom)
+    const bctx = band.getContext('2d'); const bw = band.width, bh = band.height;
     const rowProj = new Uint32Array(bh);
-    for(let y=0;y<bh;y++){ let s=0; for(let x=0;x<bw;x++){ if(bdata[(y*bw+x)*4] < 128) s++; } rowProj[y]=s; }
+    for(let y=0;y<bh;y++){ let s=0; for(let x=0;x<bw;x++){ if(bctx.getImageData(x,y,1,1).data[0] < 128) s++; } rowProj[y]=s; }
     const rowClusters = findClusters1D(rowProj, 1);
-    const digits = [];
+    const digitCanvases = [];
     for(const [sy,ey] of rowClusters){
-      const ch = ey - sy + 1;
-      const cc = cropCanvas(blk, 0, sy, bw, ch);
-      digits.push(cc);
+      const pad = 2;
+      const y0 = Math.max(0, sy - pad); const h0 = Math.min(bh - y0, ey - sy + 1 + pad*2);
+      const c = cropCanvas(band, 0, y0, bw, h0);
+      digitCanvases.push(c);
     }
-    cols.push(digits); // array of canvases for this column's digits (top->bottom)
+    cols.push(digitCanvases); // top->bottom canvases
   }
-  return cols; // [ [canvases...], [canvases...], ... ]
+  return cols;
 }
 
-// 変換：canvas arrays -> numeric arrays via OCR
-async function ocrRowBlocksToHints(rowBlocks){
+// convert canvases -> numeric arrays by OCR (per cluster)
+async function ocrRowCanvasesToNumbers(rowCanvases){
   const out = [];
-  for(const digitCanvases of rowBlocks){
+  for(const digitCanvases of rowCanvases){
     const nums = [];
     for(const c of digitCanvases){
-      const txt = await ocrCanvasSingle(c, false);
-      if(!txt){
-        const txt2 = await ocrCanvasSingle(c, true);
-        if(txt2) txt2.split('').forEach(ch=> nums.push(parseInt(ch,10)));
-      } else {
-        // if multi-digit like "12", split into digits
-        txt.split('').forEach(ch=> nums.push(parseInt(ch,10)));
-      }
-    }
-    out.push(nums.length?nums:[]);
-  }
-  return out; // e.g. [[2],[1,5],...]
-}
-
-async function ocrColBlocksToHints(colBlocks){
-  const out = [];
-  for(const digitCanvases of colBlocks){
-    const nums = [];
-    // digitCanvases are top->bottom; we want top-to-bottom order as hint list
-    for(const c of digitCanvases){
-      let txt = await ocrCanvasSingle(c, false);
-      if(!txt) txt = await ocrCanvasSingle(c, true);
+      const txt = await ocrSmallCanvas(c, true);
       if(txt){
-        // split multi-digit if necessary
-        txt.split('').forEach(ch=> nums.push(parseInt(ch,10)));
+        const n = parseInt(txt,10);
+        if(!isNaN(n)) nums.push(n);
       }
     }
-    out.push(nums.length?nums:[]);
+    out.push(nums);
   }
-  return out; // e.g. [[3],[1,1,2],...]
+  return out;
 }
-
-// ---------- ノノグラム解法（JSで完全探索） ----------
-function generateLinePossibilities(length, hints){
-  if(!hints || hints.length===0) return [Array(length).fill(0)];
-  const totalBlocks = hints.reduce((a,b)=>a+b,0) + (hints.length-1);
-  if(totalBlocks > length) return [];
-  const spaces = length - hints.reduce((a,b)=>a+b,0);
-  // distribute spaces to gaps (n = hints.length+1)
-  const distributions = [];
-  function distribute(remaining, n, cur){
-    if(n===1){ distributions.push(cur.concat([remaining])); return; }
-    for(let i=0;i<=remaining;i++) distribute(remaining-i, n-1, cur.concat([i]));
-  }
-  distribute(spaces, hints.length+1, []);
-  const results = [];
-  for(const dist of distributions){
-    const line = [];
-    for(let i=0;i<hints.length;i++){
-      line.push(...Array(dist[i]).fill(0));
-      line.push(...Array(hints[i]).fill(1));
-    }
-    line.push(...Array(dist[dist.length-1]).fill(0));
-    results.push(line.slice(0, length));
-  }
-  return results;
-}
-
-function transpose(mat){
-  const r = mat.length, c = mat[0].length;
-  const t = Array.from({length: c}, ()=>Array(r).fill(0));
-  for(let i=0;i<r;i++) for(let j=0;j<c;j++) t[j][i]=mat[i][j];
-  return t;
-}
-
-// check partial solution (rows filled so far) consistent with column possibilities
-function isValidPartial(solutionRows, colPoss){
-  const rlen = solutionRows.length;
-  for(let c=0;c<colPoss.length;c++){
-    const colSoFar = solutionRows.map(row=>row[c]);
-    // there must be at least one column possibility that matches prefix
-    const ok = colPoss[c].some(opt => {
-      for(let i=0;i<colSoFar.length;i++){
-        if(opt[i] !== colSoFar[i]) return false;
-      }
-      return true;
-    });
-    if(!ok) return false;
-  }
-  return true;
-}
-
-function solveNonogram(rowHints, colHints){
-  const rows = rowHints.length, cols = colHints.length;
-  // precompute possibilities
-  const rowPoss = rowHints.map(h => generateLinePossibilities(cols, h));
-  const colPoss = colHints.map(h => generateLinePossibilities(rows, h));
-  // quick fail
-  if(rowPoss.some(p => p.length===0) || colPoss.some(p => p.length===0)) return null;
-  const solution = [];
-  let found = null;
-  function backtrack(r){
-    if(found) return true;
-    if(r === rows){
-      found = solution.map(row => row.slice());
-      return true;
-    }
-    for(const poss of rowPoss[r]){
-      solution.push(poss);
-      if(isValidPartial(solution, colPoss)){
-        if(backtrack(r+1)) return true;
-      }
-      solution.pop();
-    }
-    return false;
-  }
-  backtrack(0);
-  return found;
-}
-
-// 可視化： resultCanvas に描画
-function visualizeSolution(solution){
-  if(!solution) { resultCanvas.style.display='none'; return; }
-  const rows = solution.length, cols = solution[0].length;
-  const cell = 24;
-  resultCanvas.width = cols*cell; resultCanvas.height = rows*cell;
-  resultCanvas.style.display='block';
-  const ctx = resultCanvas.getContext('2d');
-  ctx.clearRect(0,0,resultCanvas.width,resultCanvas.height);
-  // background
-  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,resultCanvas.width,resultCanvas.height);
-  // draw grid
-  ctx.strokeStyle = '#999'; ctx.lineWidth=1;
-  for(let r=0;r<=rows;r++){ ctx.beginPath(); ctx.moveTo(0,r*cell); ctx.lineTo(cols*cell, r*cell); ctx.stroke(); }
-  for(let c=0;c<=cols;c++){ ctx.beginPath(); ctx.moveTo(c*cell,0); ctx.lineTo(c*cell,rows*cell); ctx.stroke(); }
-  // fill cells
-  ctx.fillStyle = '#222';
-  for(let r=0;r<rows;r++){
-    for(let c=0;c<cols;c++){
-      if(solution[r][c]===1){
-        ctx.fillRect(c*cell+1, r*cell+1, cell-2, cell-2);
+async function ocrColCanvasesToNumbers(colCanvases){
+  const out = [];
+  for(const digitCanvases of colCanvases){
+    const nums = [];
+    for(const c of digitCanvases){
+      // for column digits we may prefer to rotate to read upright; ocrSmallCanvas already attempts rotation fallback
+      const txt = await ocrSmallCanvas(c, true);
+      if(txt){
+        const n = parseInt(txt,10);
+        if(!isNaN(n)) nums.push(n);
       }
     }
+    out.push(nums);
   }
+  return out;
 }
 
-// ---------- メインフロー ----------
-input.addEventListener('change', (ev)=>{
-  const f = ev.target.files[0];
+// erase detected grid lines to avoid OCR confusion (white-over peaks)
+function eraseGridLines(canvas, lineHalf=1){
+  const ctx = canvas.getContext('2d');
+  const {row,col,w,h} = projectionCounts(canvas);
+  const rowMax = Math.max(...row), colMax = Math.max(...col);
+  const rowThresh = Math.max(1, Math.floor(rowMax*0.6));
+  const colThresh = Math.max(1, Math.floor(colMax*0.6));
+  for(let y=0;y<h;y++){ if(row[y] >= rowThresh) ctx.fillStyle='#ffffff', ctx.fillRect(0, y-lineHalf, w, lineHalf*2+1); }
+  for(let x=0;x<w;x++){ if(col[x] >= colThresh) ctx.fillStyle='#ffffff', ctx.fillRect(x-lineHalf, 0, lineHalf*2+1, h); }
+}
+
+// ---------- Handlers ----------
+imgInput.addEventListener('change', (e)=>{
+  const f = e.target.files[0];
   if(!f) return;
-  resultDiv.textContent = '画像を読み込み中…';
   preview.src = URL.createObjectURL(f);
-  preview.onload = ()=>{ lastImage = preview; };
+  preview.onload = ()=> { lastImage = preview; out.textContent = '画像読み込み完了。Run を押してください。'; };
 });
 
-showDebugBtn.addEventListener('click', ()=> {
+toggleDebug.addEventListener('click', ()=> {
   debugCanvas.style.display = debugCanvas.style.display === 'none' ? 'block' : 'none';
 });
 
+// main run
 runBtn.addEventListener('click', async ()=>{
-  if(!lastImage){ alert('画像を先に選んでください'); return; }
-  resultDiv.textContent = '前処理（拡大・二値化）…';
+  if(!lastImage){ alert('画像を選んでください'); return; }
+  out.textContent = '前処理…';
   const scale = parseFloat(scaleControl.value);
   const thr = parseInt(thrControl.value, 10);
   const lineHalf = parseInt(lineHalfControl.value, 10);
 
-  let bin = preprocess(lastImage, scale, thr);
+  const bin = preprocess(lastImage, scale, thr);
   debugCanvas.width = bin.width; debugCanvas.height = bin.height;
   debugCanvas.getContext('2d').drawImage(bin,0,0);
 
-  resultDiv.textContent = 'グリッド検出と除去…';
-  // detect bounds
+  out.textContent = 'グリッド検出…';
   const grid = detectGridBounds(bin);
-  if(!grid){
-    resultDiv.textContent = 'グリッドを検出できませんでした。閾値や画像を調整してください。';
-    return;
-  }
-  // remove grid lines (white over peaks)
-  const ctx = bin.getContext('2d');
-  const {row, col, w, h} = projection(bin);
-  const rowThresh = Math.max(1, Math.floor(Math.max(...row) * 0.6));
-  const colThresh = Math.max(1, Math.floor(Math.max(...col) * 0.6));
-  // erase horizontal peaks
-  for(let y=0;y<h;y++){
-    if(row[y] >= rowThresh) ctx.fillStyle = '#ffffff', ctx.fillRect(0, y-lineHalf, w, lineHalf*2+1);
-  }
-  for(let x=0;x<w;x++){
-    if(col[x] >= colThresh) ctx.fillStyle = '#ffffff', ctx.fillRect(x-lineHalf, 0, lineHalf*2+1, h);
-  }
+  if(!grid){ out.textContent = 'グリッドが見つかりませんでした。画像や閾値を調整してください。'; return; }
+
+  out.textContent = 'グリッド除去…';
+  // erase lines
+  eraseGridLines(bin, lineHalf);
   debugCanvas.getContext('2d').clearRect(0,0,debugCanvas.width,debugCanvas.height);
   debugCanvas.getContext('2d').drawImage(bin,0,0);
 
-  resultDiv.textContent = 'ヒント領域の切り出し…';
-  // top area: columns hints
+  out.textContent = 'ヒント領域切り出し…';
+  // top area (columns hints)
   const topArea = cropCanvas(bin, grid.left, 0, grid.right - grid.left, grid.top);
-  // left area: rows hints
+  // left area (row hints)
   const leftArea = cropCanvas(bin, 0, grid.top, grid.left, grid.bottom - grid.top);
 
-  // slice into digit canvases
-  resultDiv.textContent = '列ヒントの分割（縦）とOCR…';
-  const colBlocks = sliceColHintBlocks(topArea);
-  const colHints = await ocrColBlocksToHints(colBlocks);
+  out.textContent = '行ヒントのクラスタ切り出し…';
+  const rowCanvases = sliceLeftIntoRowDigitCanvases(leftArea);
+  out.textContent = `行ヒント 行数候補: ${rowCanvases.length}. OCR実行中...`;
+  const rowNums = await ocrRowCanvasesToNumbers(rowCanvases);
 
-  resultDiv.textContent = '行ヒントの分割（横）とOCR…';
-  const rowBlocks = sliceRowHintBlocks(leftArea);
-  const rowHints = await ocrRowBlocksToHints(rowBlocks);
+  out.textContent = '列ヒントのクラスタ切り出し…';
+  const colCanvases = sliceTopIntoColDigitCanvases(topArea);
+  out.textContent = `列ヒント 列数候補: ${colCanvases.length}. OCR実行中...`;
+  const colNums = await ocrColCanvasesToNumbers(colCanvases);
 
-  // filter empty groups and align counts
-  const filteredCols = colHints.map(arr => arr.filter(n=>!isNaN(n))).filter(a=>a.length>0);
-  const filteredRows = rowHints.map(arr => arr.filter(n=>!isNaN(n))).filter(a=>a.length>0);
+  // filter empty lines and produce final arrays
+  const rows = rowNums.map(r => r.filter(n=>!isNaN(n))).filter(r=>r.length>0);
+  const cols = colNums.map(c => c.filter(n=>!isNaN(n))).filter(c=>c.length>0);
 
-  resultDiv.textContent = '抽出完了。\n列ヒント:\n' + JSON.stringify(filteredCols) + '\n\n行ヒント:\n' + JSON.stringify(filteredRows)
-    + '\n\nSolverを起動します…';
-
-  // determine dimensions
-  const nCols = filteredCols.length;
-  const nRows = filteredRows.length;
-  if(nCols === 0 || nRows === 0){
-    resultDiv.textContent += '\nヒントが空です。OCR設定を調整してください。';
-    return;
-  }
-
-  // Convert arrays of single digits to numbers where needed (already digits)
-  // Now solve
-  resultDiv.textContent += `\nサイズ: ${nRows} x ${nCols}`;
-  const sol = solveNonogram(filteredRows, filteredCols);
-  if(sol){
-    resultDiv.textContent += '\n解が見つかりました。可視化します。';
-    visualizeSolution(sol);
-  } else {
-    resultDiv.textContent += '\n解は見つかりませんでした。ヒントの認識が不完全な可能性があります。';
-    resultCanvas.style.display='none';
-  }
+  const result = { rows, cols };
+  out.textContent = JSON.stringify(result, null, 2);
+  console.log('parsed hints', result);
 });
-
 </script>
 </body>
 </html>
