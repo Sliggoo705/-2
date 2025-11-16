@@ -293,3 +293,154 @@ input.addEventListener('change', async (ev) => {
 </script>
 </body>
 </html>
+
+import cv2
+import pytesseract
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# 高精度OCR＋ヒント抽出
+# -----------------------------
+def extract_hints_high_precision(image_path, orientation='row', invert=True):
+    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (3,3), 0)
+    thresh_type = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+    _, thresh = cv2.threshold(blur, 0, 255, thresh_type + cv2.THRESH_OTSU)
+    
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    rects = [cv2.boundingRect(c) for c in contours]
+    
+    if orientation=='row':
+        rects = sorted(rects, key=lambda x: (x[1], x[0]))
+    else:
+        rects = sorted(rects, key=lambda x: (x[0], x[1]))
+    
+    hints = []
+    current_line = []
+    last_coord = -1000
+    for x, y, w, h in rects:
+        coord = y if orientation=='row' else x
+        if abs(coord - last_coord) > max(h,w)*1.5:
+            if current_line:
+                hints.append(current_line)
+            current_line = []
+        last_coord = coord
+        
+        digit_img = thresh[y:y+h, x:x+w]
+        digit_text = pytesseract.image_to_string(digit_img, config='--psm 10 outputbase digits').strip()
+        if digit_text.isdigit():
+            current_line.append(int(digit_text))
+    if current_line:
+        hints.append(current_line)
+    return hints
+
+# -----------------------------
+# OCR補正
+# -----------------------------
+def preprocess_ocr_hints(raw_hints, max_size):
+    processed = []
+    for hints in raw_hints:
+        hints = [h for h in hints if h != 0]
+        total = sum(hints) + len(hints)-1
+        if total > max_size:
+            scale = max_size / total
+            hints = [max(1, round(h*scale)) for h in hints]
+        processed.append(hints)
+    return processed
+
+# -----------------------------
+# 完全解探索関数
+# -----------------------------
+def generate_line_possibilities(length, hints):
+    if not hints:
+        return [[0]*length]
+    total_blocks = sum(hints) + len(hints)-1
+    if total_blocks > length:
+        return []
+
+    spaces = length - sum(hints)
+    def distribute_spaces(spaces, n):
+        if n == 1:
+            yield [spaces]
+        else:
+            for i in range(spaces+1):
+                for rest in distribute_spaces(spaces-i, n-1):
+                    yield [i] + rest
+
+    possibilities = []
+    for distribution in distribute_spaces(spaces, len(hints)+1):
+        line = []
+        for pre, block in zip(distribution, hints + [0]):
+            line.extend([0]*pre)
+            line.extend([1]*block)
+        line = line[:length]
+        possibilities.append(line)
+    return possibilities
+
+def is_valid(solution, col_possibilities):
+    for c_idx, col_opts in enumerate(col_possibilities):
+        col_so_far = [row[c_idx] for row in solution]
+        if not any(opt[:len(col_so_far)] == col_so_far for opt in col_opts):
+            return False
+    return True
+
+def solve_nonogram_bt(row_hints, col_hints):
+    rows, cols = len(row_hints), len(col_hints)
+    row_possibilities = [generate_line_possibilities(cols, h) for h in row_hints]
+    col_possibilities = [generate_line_possibilities(rows, h) for h in col_hints]
+
+    solution = []
+    def backtrack(r):
+        if r == rows:
+            return True
+        for possibility in row_possibilities[r]:
+            solution.append(possibility)
+            if is_valid(solution, col_possibilities):
+                if backtrack(r+1):
+                    return True
+            solution.pop()
+        return False
+
+    if backtrack(0):
+        return solution
+    else:
+        return None
+
+# -----------------------------
+# 可視化
+# -----------------------------
+def visualize_solution(solution):
+    plt.figure(figsize=(6,6))
+    plt.imshow(solution, cmap='Greys', interpolation='none')
+    plt.xticks(range(len(solution[0])))
+    plt.yticks(range(len(solution)))
+    plt.gca().invert_yaxis()
+    plt.show()
+
+# -----------------------------
+# 実行例
+# -----------------------------
+if __name__ == "__main__":
+    # 画像パスを指定
+    image_row_path = "row_hints_image.png"  # 行ヒント画像
+    image_col_path = "col_hints_image.png"  # 列ヒント画像
+    size = 15  # マス数
+
+    # 高精度OCRでヒント抽出
+    ocr_row_hints = extract_hints_high_precision(image_row_path, 'row')
+    ocr_col_hints = extract_hints_high_precision(image_col_path, 'col')
+
+    # OCR補正
+    row_hints = preprocess_ocr_hints(ocr_row_hints, size)
+    col_hints = preprocess_ocr_hints(ocr_col_hints, size)
+
+    # 解答生成
+    solution = solve_nonogram_bt(row_hints, col_hints)
+
+    # 可視化
+    if solution:
+        visualize_solution(solution)
+    else:
+        print("解は見つかりませんでした")
+
