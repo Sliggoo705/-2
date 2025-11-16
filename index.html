@@ -1,141 +1,95 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8">
-  <title>Picross OCR – Grid Based</title>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
-  <style>
-    body { font-family: sans-serif; margin:20px; }
-    #preview, #debugCanvas { max-width:95vw; border:1px solid #ccc; margin-top:10px; }
-    pre { background:#f0f0f0; padding:10px; }
-  </style>
-</head>
-<body>
-<h2>Picross OCR – Grid Based</h2>
-<p>盤面グリッド検出 → ヒント領域のみOCR</p>
+ <script>
+// --- 省略：前処理、グリッド検出、OCR基本関数はそのまま ---
+// ここでは新たに「縦方向/横方向にヒントを切り出す関数」を追加します。
 
-<input type="file" id="imgInput" accept="image/*">
-<img id="preview">
-<canvas id="debugCanvas"></canvas>
-<pre id="out"></pre>
-
-<script>
-const inp = document.getElementById("imgInput");
-const preview = document.getElementById("preview");
-const debug = document.getElementById("debugCanvas");
-const out = document.getElementById("out");
-
-// 便利関数
-function makeCanvas(w,h){ const c=document.createElement("canvas"); c.width=w; c.height=h; return c; }
-
-// 1. 二値化 + 前処理
-function preprocess(img){
-  const scale = 2.5;  // 高精細化
-  const canvas = makeCanvas(img.width*scale, img.height*scale);
-  const ctx = canvas.getContext("2d");
-
-  ctx.drawImage(img,0,0,canvas.width,canvas.height);
-
-  // グレースケール化
-  let im = ctx.getImageData(0,0,canvas.width,canvas.height);
-  let d = im.data;
-  for(let i=0;i<d.length;i+=4){
-    const g = (d[i]+d[i+1]+d[i+2])/3;
-    const v = g > 180 ? 255 : 0;
-    d[i]=d[i+1]=d[i+2]=v;
-  }
-  ctx.putImageData(im,0,0);
-  return canvas;
-}
-
-// 2. グリッド検出（黒線密度から判定）
-function detectGrid(canvas){
+// 横方向に「数字ブロック」を切り出す（行ヒント用）
+function sliceHorizontalBlocks(canvas) {
   const w=canvas.width, h=canvas.height;
   const ctx=canvas.getContext("2d");
   const data=ctx.getImageData(0,0,w,h).data;
 
-  let row=new Uint32Array(h);
-  let col=new Uint32Array(w);
-
-  // 黒画素数をカウント
-  for(let y=0;y<h;y++){
-    for(let x=0;x<w;x++){
-      const i=(y*w+x)*4;
-      if(data[i]<50) { row[y]++; col[x]++; }
+  let colSum=new Uint32Array(w);
+  for(let x=0;x<w;x++){
+    for(let y=0;y<h;y++){
+      if(data[(y*w+x)*4] < 128) colSum[x]++;
     }
   }
 
-  // 黒線がたくさんあるyを抽出 → 水平方向のグリッド線
-  const rowLines=[];
-  let threshold = Math.max(...row) * 0.6;
-  for(let y=0;y<h;y++){
-    if(row[y]>=threshold) rowLines.push(y);
-  }
+  const blocks=[];
+  let inBlock=false, startX=0;
 
-  // 同様に x 軸方向
-  const colLines=[];
-  threshold = Math.max(...col) * 0.6;
   for(let x=0;x<w;x++){
-    if(col[x]>=threshold) colLines.push(x);
+    if(colSum[x]>0){
+      if(!inBlock){ inBlock=true; startX=x; }
+    } else {
+      if(inBlock){
+        blocks.push({x:startX, width:x-startX});
+        inBlock=false;
+      }
+    }
+  }
+  if(inBlock) blocks.push({x:startX, width:w-startX});
+
+  return blocks.map(b => crop(canvas,b.x,0,b.width,h));
+}
+
+
+// 縦方向に数字ブロックを切り出す（列ヒント用）
+function sliceVerticalBlocks(canvas){
+  const w=canvas.width, h=canvas.height;
+  const ctx=canvas.getContext("2d");
+  const data=ctx.getImageData(0,0,w,h).data;
+
+  let rowSum=new Uint32Array(h);
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      if(data[(y*w+x)*4] < 128) rowSum[y]++;
+    }
   }
 
-  // 最初と最後が盤面の囲い線になる
-  const top = rowLines[0];
-  const bottom = rowLines[rowLines.length-1];
-  const left = colLines[0];
-  const right = colLines[colLines.length-1];
+  const blocks=[];
+  let inBlock=false, startY=0;
 
-  return {top,bottom,left,right,rowLines,colLines};
+  for(let y=0;y<h;y++){
+    if(rowSum[y]>0){
+      if(!inBlock){ inBlock=true; startY=y; }
+    } else {
+      if(inBlock){
+        blocks.push({y:startY, height:y-startY});
+        inBlock=false;
+      }
+    }
+  }
+  if(inBlock) blocks.push({y:startY, height:h-startY});
+
+  return blocks.map(b => crop(canvas, 0, b.y, w, b.height));
 }
 
-// OCR（数字限定）
-async function ocr(canvas){
-  const scale = 2;
-  const c = makeCanvas(canvas.width*scale, canvas.height*scale);
-  c.getContext("2d").drawImage(canvas,0,0,c.width,c.height);
 
-  const res = await Tesseract.recognize(
-    c, 'eng',
-    { tessedit_char_whitelist:"0123456789", tessedit_pageseg_mode:"7" }
-  );
-  return (res.data.text || "").replace(/[^\d]/g,"");
+// --- メイン処理内に追加 ---
+// 列ヒント領域：縦にブロック化して OCR
+// 行ヒント領域：横にブロック化して OCR
+
+// メイン処理内の colArea / rowArea を OCR する部分を次のように書き換えます:
+
+const colBlocks = sliceVerticalBlocks(colArea);
+let colHints = [];
+for(const blk of colBlocks){
+  const txt = await ocr(blk);
+  if(txt) colHints.push(parseInt(txt,10));
 }
 
-// 範囲切り抜き
-function crop(base, x,y,w,h){
-  const c = makeCanvas(w,h);
-  c.getContext("2d").drawImage(base,x,y,w,h,0,0,w,h);
-  return c;
+const rowBlocks = sliceHorizontalBlocks(rowArea);
+let rowHints = [];
+for(const blk of rowBlocks){
+  const txt = await ocr(blk);
+  if(txt){
+    // "112" のように続けて読まれた場合は1文字ずつ分割
+    txt.split("").forEach(t => rowHints.push(parseInt(t,10)));
+  }
 }
 
-inp.onchange = ()=>{
-  const file = inp.files[0];
-  preview.src = URL.createObjectURL(file);
-
-  preview.onload = async ()=>{
-    out.textContent="解析中…";
-
-    const bin = preprocess(preview);
-    debug.width = bin.width; debug.height = bin.height;
-    debug.getContext("2d").drawImage(bin,0,0);
-
-    const grid = detectGrid(bin);
-    out.textContent = "グリッド検出完了\n" + JSON.stringify(grid,null,2);
-
-    // 盤面より上 → 列ヒント
-    const colArea = crop(bin, grid.left, 0, grid.right-grid.left, grid.top);
-    // 盤面より左 → 行ヒント
-    const rowArea = crop(bin, 0, grid.top, grid.left, grid.bottom-grid.top);
-
-    // OCR
-    const colText = await ocr(colArea);
-    const rowText = await ocr(rowArea);
-
-    out.textContent =
-      "=== 列ヒント（OCR） ===\n" + colText +
-      "\n\n=== 行ヒント（OCR） ===\n" + rowText;
-  };
-};
+out.textContent =
+  "=== 列ヒント ===\n" + JSON.stringify(colHints) +
+  "\n\n=== 行ヒント ===\n" + JSON.stringify(rowHints);
 </script>
-</body>
-</html>
