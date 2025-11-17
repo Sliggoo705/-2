@@ -2,10 +2,10 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract Test</title>
+<title>Digit Extract High Precision</title>
 <style>
   body { font-family: sans-serif; }
-  #digits img {
+  #digits canvas {
     margin: 4px;
     border: 1px solid #ccc;
   }
@@ -13,7 +13,7 @@
 </head>
 
 <body>
-<h2>Digit Extract Test</h2>
+<h2>Digit Extract High Precision (A版)</h2>
 
 <input type="file" id="fileInput" accept="image/*"><br><br>
 
@@ -21,13 +21,15 @@
 <div id="digits"></div>
 
 <!-- OpenCV.js -->
-<script async src="https://docs.opencv.org/4.x/opencv.js" onload="cvLoaded()" ></script>
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="cvLoaded()"></script>
 
 <script>
+// ログ表示用
 function log(text) {
     document.getElementById("log").innerHTML += text + "<br>";
 }
 
+// OpenCVロード完了フラグ
 let cvReady = false;
 
 function cvLoaded() {
@@ -37,6 +39,7 @@ function cvLoaded() {
     };
 }
 
+// 画像アップロードイベント
 document.getElementById("fileInput").addEventListener("change", async (e) => {
     if (!cvReady) {
         alert("OpenCV is not ready yet. Wait 1–2 seconds.");
@@ -49,6 +52,9 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     img.onload = () => extractDigits(img);
 });
 
+// ----------------------------
+// 改良版：数字抽出関数
+// ----------------------------
 function extractDigits(img) {
     log("=== Start extraction ===");
 
@@ -58,14 +64,12 @@ function extractDigits(img) {
     // グレースケール
     let gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    log("Converted to gray");
 
-    // 自動二値化 (FAST)
+    // 二値化（OTSU）
     let bin = new cv.Mat();
     cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-    log("Binarized");
 
-    // ノイズ除去（小さいゴミを取る）
+    // ノイズ除去（小さい点を消す）
     let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
     cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kernel);
 
@@ -73,27 +77,49 @@ function extractDigits(img) {
     let contours = new cv.MatVector();
     let hierarchy = new cv.Mat();
     cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-    log("Contours found: " + contours.size());
 
-    let digitCount = 0;
+    // --- 盤面領域を推定して除外 ---
+    let boardRect = null;
+    let maxArea = 0;
+    for (let i = 0; i < contours.size(); i++) {
+        let cnt = contours.get(i);
+        let rect = cv.boundingRect(cnt);
+        let area = rect.width * rect.height;
+        if (area > maxArea) {
+            maxArea = area;
+            boardRect = rect;
+        }
+    }
+    log("Board area (excluded): " + JSON.stringify(boardRect));
+
+    // 数字抽出
     const container = document.getElementById("digits");
     container.innerHTML = "";
+    let digitCount = 0;
 
     for (let i = 0; i < contours.size(); i++) {
         let cnt = contours.get(i);
         let rect = cv.boundingRect(cnt);
-
         let x = rect.x, y = rect.y, w = rect.width, h = rect.height;
 
-        // 数字の可能性が高いサイズだけを採用
-        if (w < 8 || h < 8 || w > 80 || h > 80) continue;
+        // 盤面領域は除外
+        if (boardRect &&
+            x > boardRect.x - 5 &&
+            x + w < boardRect.x + boardRect.width + 5 &&
+            y > boardRect.y - 5 &&
+            y + h < boardRect.y + boardRect.height + 5) 
+        {
+            continue;
+        }
 
-        log(`✔ Candidate ${digitCount+1}: x=${x}, y=${y}, w=${w}, h=${h}`);
+        // サイズフィルタ（数字サイズのみ）
+        if (w > 40 && h > 40) continue; // 大きすぎる → 盤面の一部
+        if (w < 8 || h < 8) continue;   // 小さすぎる → ノイズ
 
-        // 切り抜き
+        log(`✔ Digit ${digitCount+1}: x=${x}, y=${y}, w=${w}, h=${h}`);
+
+        // 切り抜き & 表示
         let roi = bin.roi(new cv.Rect(x, y, w, h));
-
-        // 画像化
         let canvas = document.createElement("canvas");
         cv.imshow(canvas, roi);
         container.appendChild(canvas);
@@ -102,7 +128,7 @@ function extractDigits(img) {
         digitCount++;
     }
 
-    log("Total digit candidates: " + digitCount);
+    log("Total digits extracted: " + digitCount);
 
     // 後処理
     src.delete(); gray.delete(); bin.delete();
