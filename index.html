@@ -5,12 +5,20 @@
     <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 
     <script>
-        // OpenCV 読み込み完了時に呼ばれる公式コールバック
-        function onOpenCvReady() {
+        cv['onRuntimeInitialized'] = () => {
             console.log("OpenCV loaded!");
+        };
+
+        function handleFile(ev) {
+            const file = ev.target.files[0];
+            if (!file) return;
 
             const img = document.getElementById("puzzle");
-            debugOCR(img);
+            img.src = URL.createObjectURL(file);
+
+            img.onload = () => {
+                debugOCR(img);
+            };
         }
 
         function debugOCR(imgElement) {
@@ -57,12 +65,11 @@
 </head>
 
 <body>
-    <p>OpenCV debug test</p>
-    <img id="puzzle" src="your_image.png">
+    <h2>画像をアップロードしてください</h2>
 
-    <script>
-        // 公式の OpenCV 初期化完了フック
-        cv['onRuntimeInitialized'] = onOpenCvReady;
-    </script>
+    <input type="file" accept="image/*" onchange="handleFile(event)">
+    <br><br>
+
+    <img id="puzzle" style="max-width: 300px;">
 </body>
 </html>
