@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Picross CNN OCR 完全版</title>
+<title>Picross CNN OCR 高速版</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
 <style>
 body{font-family:Arial,sans-serif;margin:16px;}
@@ -11,7 +11,7 @@ pre{background:#f8f8f8;padding:10px;overflow-x:auto;}
 </style>
 </head>
 <body>
-<h2>Picross CNN OCR 完全版</h2>
+<h2>Picross CNN OCR 高速版</h2>
 <input type="file" id="imgInput" accept="image/*">
 <canvas id="preview"></canvas>
 <canvas id="solution"></canvas>
@@ -34,19 +34,22 @@ loadModel();
 function makeCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
 function cropCanvas(src,x,y,w,h){ const c=makeCanvas(w,h); c.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h); return c; }
 
-// --- 前処理: 二値化＋グリッド線除去 ---
+// --- 前処理 ---
 function preprocessImage(img){
-    const c=makeCanvas(img.width,img.height);
+    // 画像を縮小して高速化
+    const scale = 0.5; // 元画像が大きい場合はさらに小さく
+    const w=Math.floor(img.width*scale), h=Math.floor(img.height*scale);
+    const c=makeCanvas(w,h);
     const ctx=c.getContext('2d');
-    ctx.drawImage(img,0,0);
-    const im=ctx.getImageData(0,0,c.width,c.height);
+    ctx.drawImage(img,0,0,w,h);
+    const im=ctx.getImageData(0,0,w,h);
     const d=im.data;
     for(let i=0;i<d.length;i+=4){
         const v=(d[i]+d[i+1]+d[i+2])/3>160?255:0;
         d[i]=d[i+1]=d[i+2]=v;
     }
     ctx.putImageData(im,0,0);
-    const w=c.width,h=c.height;
+    // グリッド線除去（横・縦）
     const data=ctx.getImageData(0,0,w,h); const pixels=data.data;
     const threshold=0.95;
     for(let y=0;y<h;y++){
@@ -93,7 +96,7 @@ function extractClusters(canvas,isRow=true){
     return clusters;
 }
 
-// --- クラスタ内の数字分割 ---
+// --- クラスタ内複数数字分割 ---
 function splitCluster(clusterCanvas,isRow=true){
     const ctx=clusterCanvas.getContext('2d');
     const w=clusterCanvas.width,h=clusterCanvas.height;
@@ -160,18 +163,18 @@ imgInput.addEventListener('change',async ev=>{
         for(const [start,end] of rowClusters){
             const cluster=cropCanvas(rowArea,0,start,rowArea.width,end-start);
             const digits=splitCluster(cluster,true);
-            const rowDigits=[];
-            for(const d of digits){ rowDigits.push(await recognizeDigit(d)); }
+            // --- 並列化 ---
+            const rowDigits = await Promise.all(digits.map(d=>recognizeDigit(d)));
             rows.push(rowDigits);
         }
+
         // 列ヒント領域
         const colArea=cropCanvas(bin,0,0,bin.width,Math.floor(bin.height*0.2));
         const colClusters=extractClusters(colArea,false);
         for(const [start,end] of colClusters){
             const cluster=cropCanvas(colArea,start,0,end-start,colArea.height);
             const digits=splitCluster(cluster,false);
-            const colDigits=[];
-            for(const d of digits){ colDigits.push(await recognizeDigit(d)); }
+            const colDigits = await Promise.all(digits.map(d=>recognizeDigit(d)));
             cols.push(colDigits);
         }
 
