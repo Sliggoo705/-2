@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + 28x28 Normalize (Stable Ultimate)</title>
+<title>Digit Extract + 28x28 Normalize (Stable)</title>
 <style>
   body { font-family: sans-serif; }
   #digits canvas {
@@ -13,102 +13,32 @@
 </head>
 
 <body>
-<h2>Digit Extract + 28x28 Normalize (Stable Ultimate)</h2>
+<h2>Digit Extract + 28x28 Normalize (Stable)</h2>
 
 <input type="file" id="fileInput" accept="image/*"><br><br>
-
 <div id="log"></div>
 <div id="digits"></div>
 
-<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+<!-- OpenCV.js -->
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+
 <script>
-// --------------------------
-// ログ関数
-// --------------------------
-function log(text){
-    document.getElementById("log").innerHTML += text + "<br>";
-}
+document.addEventListener("DOMContentLoaded", async ()=>{
+    const fileInput = document.getElementById("fileInput");
+    const logDiv = document.getElementById("log");
+    const digitsDiv = document.getElementById("digits");
 
-// --------------------------
-// OpenCVロード完了監視
-// --------------------------
-let cvReady = false;
-let checkCv = setInterval(()=>{
-    if(window.cv && cv['onRuntimeInitialized']){
-        clearInterval(checkCv);
-        cv['onRuntimeInitialized'] = ()=>{
-            cvReady = true;
+    function log(text){
+        logDiv.innerHTML += text + "<br>";
+    }
+
+    // OpenCVロード完了を待つ
+    await new Promise(resolve=>{
+        cv['onRuntimeInitialized']=()=>{
             log("✔ OpenCV.js ready!");
+            resolve();
         };
-    }
-},100);
-
-// OpenCVロード完了を待機する関数
-function waitForCvReady(){
-    return new Promise(resolve=>{
-        const check = setInterval(()=>{
-            if(cvReady){
-                clearInterval(check);
-                resolve();
-            }
-        },50);
     });
-}
 
-// --------------------------
-// 画像選択時
-// --------------------------
-document.getElementById("fileInput").addEventListener("change", async (e) => {
-    if(!cvReady){
-        log("OpenCV.js is not ready yet. Waiting...");
-        await waitForCvReady();
-    }
-    const file = e.target.files[0];
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    img.onload = () => extractDigits(img);
-});
-
-// --------------------------
-// 数字抽出関数
-// --------------------------
-function extractDigits(img){
-    log("=== Start extraction ===");
-
-    let src = cv.imread(img);
-    log("Read image: "+src.cols+" x "+src.rows);
-
-    // グレースケール
-    let gray = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-    // 二値化
-    let bin = new cv.Mat();
-    cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-
-    // モルフォロジー開処理
-    let kernel = cv.Mat.ones(3,3,cv.CV_8U);
-    cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kernel);
-
-    // 輪郭抽出
-    let contours = new cv.MatVector();
-    let hierarchy = new cv.Mat();
-    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    // 盤面除外（最大面積の矩形）
-    let boardRect=null;
-    let maxArea=0;
-    for(let i=0;i<contours.size();i++){
-        let rect=cv.boundingRect(contours.get(i));
-        let area=rect.width*rect.height;
-        if(area>maxArea){ maxArea=area; boardRect=rect; }
-    }
-    log("Board area (excluded): "+JSON.stringify(boardRect));
-
-    // 数字候補抽出
-    let candidates=[];
-    for(let i=0;i<contours.size();i++){
-        let rect=cv.boundingRect(contours.get(i));
-        if(boardRect &&
-           rect.x>boardRect.x-5 &&
-           rect.x+rect.width<boardRect.x+boardRect.width+5
+    fileInput.addEventListener("change", (e)=>{
+        const file = e.target.files[0
