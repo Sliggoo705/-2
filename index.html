@@ -1,51 +1,114 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>OpenCV Load Test</title>
+<meta charset="UTF-8">
+<title>Digit Extract Test</title>
+<style>
+  body { font-family: sans-serif; }
+  #digits img {
+    margin: 4px;
+    border: 1px solid #ccc;
+  }
+</style>
 </head>
-<body>
-<h2>OpenCV debug test</h2>
 
-<input type="file" id="fileInput">
-<br><br>
-<canvas id="canvasOutput"></canvas>
+<body>
+<h2>Digit Extract Test</h2>
+
+<input type="file" id="fileInput" accept="image/*"><br><br>
+
+<div id="log"></div>
+<div id="digits"></div>
 
 <!-- OpenCV.js -->
-<script async
-    src="https://docs.opencv.org/4.10.0/opencv.js"
-    onload="onOpenCvReady();">
-</script>
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="cvLoaded()" ></script>
 
 <script>
-function onOpenCvReady() {
-    console.log("OpenCV is ready!");
+function log(text) {
+    document.getElementById("log").innerHTML += text + "<br>";
+}
 
-    const input = document.getElementById('fileInput');
-    input.addEventListener('change', function(e) {
-        let img = new Image();
-        img.onload = function () {
-            let canvas = document.getElementById("canvasOutput");
-            canvas.width = img.width;
-            canvas.height = img.height;
-            let ctx = canvas.getContext("2d");
-            ctx.drawImage(img, 0, 0);
+let cvReady = false;
 
-            console.log("Image loaded:", img.width, img.height);
+function cvLoaded() {
+    cv['onRuntimeInitialized'] = () => {
+        cvReady = true;
+        log("✔ OpenCV.js ready!");
+    };
+}
 
-            // OpenCV読み込み成功が確認できる最小処理
-            let src = cv.imread(canvas);
-            console.log("cv.imread OK");
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+    if (!cvReady) {
+        alert("OpenCV is not ready yet. Wait 1–2 seconds.");
+        return;
+    }
 
-            let gray = new cv.Mat();
-            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-            console.log("cv.cvtColor OK");
+    const file = e.target.files[0];
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => extractDigits(img);
+});
 
-            src.delete();
-            gray.delete();
-        };
-        img.src = URL.createObjectURL(e.target.files[0]);
-    });
+function extractDigits(img) {
+    log("=== Start extraction ===");
+
+    let src = cv.imread(img);
+    log("Read image: " + src.cols + " x " + src.rows);
+
+    // グレースケール
+    let gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    log("Converted to gray");
+
+    // 自動二値化 (FAST)
+    let bin = new cv.Mat();
+    cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+    log("Binarized");
+
+    // ノイズ除去（小さいゴミを取る）
+    let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+    cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kernel);
+
+    // 輪郭抽出
+    let contours = new cv.MatVector();
+    let hierarchy = new cv.Mat();
+    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    log("Contours found: " + contours.size());
+
+    let digitCount = 0;
+    const container = document.getElementById("digits");
+    container.innerHTML = "";
+
+    for (let i = 0; i < contours.size(); i++) {
+        let cnt = contours.get(i);
+        let rect = cv.boundingRect(cnt);
+
+        let x = rect.x, y = rect.y, w = rect.width, h = rect.height;
+
+        // 数字の可能性が高いサイズだけを採用
+        if (w < 8 || h < 8 || w > 80 || h > 80) continue;
+
+        log(`✔ Candidate ${digitCount+1}: x=${x}, y=${y}, w=${w}, h=${h}`);
+
+        // 切り抜き
+        let roi = bin.roi(new cv.Rect(x, y, w, h));
+
+        // 画像化
+        let canvas = document.createElement("canvas");
+        cv.imshow(canvas, roi);
+        container.appendChild(canvas);
+
+        roi.delete();
+        digitCount++;
+    }
+
+    log("Total digit candidates: " + digitCount);
+
+    // 後処理
+    src.delete(); gray.delete(); bin.delete();
+    contours.delete(); hierarchy.delete(); kernel.delete();
+
+    log("=== End extraction ===");
 }
 </script>
 
