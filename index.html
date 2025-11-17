@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Picross Auto OCR & Solver</title>
+<title>Picross Fast OCR & Solver</title>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
 <style>
 body{font-family:Arial,sans-serif;margin:16px;background:#fafafa;}
@@ -13,84 +13,67 @@ pre{background:#fff;padding:10px;border-radius:6px;margin-top:10px;overflow-x:au
 </style>
 </head>
 <body>
-<h2>Picross Auto OCR & Solver</h2>
-<p class="small">スクショをアップロードすると自動でヒントを解析し、解答を描画します。</p>
+<h2>Picross Fast OCR & Solver</h2>
+<p class="small">スクショをアップロードすると高速でOCR→ヒント修正→解答描画します。</p>
 <input type="file" id="imgInput" accept="image/*">
 <canvas id="preview"></canvas>
 <canvas id="solution"></canvas>
 <pre id="jsonOut">JSON結果はここに表示されます。</pre>
 
 <script>
-
-// ----- 変数 -----
 const imgInput = document.getElementById('imgInput');
 const preview = document.getElementById('preview');
 const solutionCanvas = document.getElementById('solution');
 const jsonOut = document.getElementById('jsonOut');
-
 let uploadedImg = null;
 
-// ----- ヘルパー関数 -----
+// --- Canvas helper ---
 function makeCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
 function cropCanvas(src,x,y,w,h){ const c=makeCanvas(w,h); c.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h); return c; }
 function median(arr){ const s=arr.slice().sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
-function preprocessImage(img,scale=2.5,thresh=160){
-  const cw = Math.round(img.width*scale), ch=Math.round(img.height*scale);
-  const c = makeCanvas(cw,ch);
-  const ctx = c.getContext('2d');
+
+// --- Preprocess image ---
+function preprocessImage(img,scale=1.5,thresh=160){
+  const cw=Math.round(img.width*scale), ch=Math.round(img.height*scale);
+  const c=makeCanvas(cw,ch);
+  const ctx=c.getContext('2d');
   ctx.drawImage(img,0,0,cw,ch);
-  const im = ctx.getImageData(0,0,cw,ch);
-  const d = im.data;
+  const im=ctx.getImageData(0,0,cw,ch); const d=im.data;
   for(let i=0;i<d.length;i+=4){
     const g=(d[i]+d[i+1]+d[i+2])/3;
-    const v=g>thresh?255:0;
-    d[i]=d[i+1]=d[i+2]=v;
+    const v=g>thresh?255:0; d[i]=d[i+1]=d[i+2]=v;
   }
   ctx.putImageData(im,0,0);
   return c;
 }
 
-// ----- OCR処理 -----
-async function ocrCluster(cluster,maxVal){
-  const s = makeCanvas(Math.max(8,cluster.width*1.6),Math.max(8,cluster.height*1.6));
-  s.getContext('2d').drawImage(cluster,0,0,s.width,s.height);
+// --- OCR a small canvas ---
+async function ocrSingle(c){
+  const s=makeCanvas(Math.max(8,c.width*1.6),Math.max(8,c.height*1.6));
+  s.getContext('2d').drawImage(c,0,0,s.width,s.height);
   try{
-    let res = await Tesseract.recognize(s,'eng',{tessedit_char_whitelist:'0123456789', tessedit_pageseg_mode:7});
-    let txt = (res?.data?.text||'').replace(/[^\d]/g,'').trim();
-    // 回転OCRで補完
-    if(!txt){
-      const r = makeCanvas(s.height,s.width);
-      const ctx=r.getContext('2d');
-      ctx.translate(r.width/2,r.height/2);
-      ctx.rotate(Math.PI/2);
-      ctx.drawImage(s,-s.width/2,-s.height/2);
-      res = await Tesseract.recognize(r,'eng',{tessedit_char_whitelist:'0123456789', tessedit_pageseg_mode:7});
-      txt=(res?.data?.text||'').replace(/[^\d]/g,'').trim();
-    }
-    return txt;
-  }catch(e){ console.error('OCR error',e); return ''; }
+    let res=await Tesseract.recognize(s,'eng',{tessedit_char_whitelist:'0123456789', tessedit_pageseg_mode:7});
+    return (res?.data?.text||'').replace(/[^\d]/g,'').trim();
+  }catch(e){ console.error(e); return ''; }
 }
 
-// ----- 連続数字の最適分割 -----
+// --- Split digits heuristically ---
 function splitDigitsHeuristic(s,maxVal){
   if(!s) return [];
   s=s.replace(/^0+/,''); if(!s) return [];
   const L=s.length; let best={parts:null,count:999};
   for(let mask=0;mask<1<<(L-1);mask++){
     const parts=[]; let cur=s[0];
-    for(let i=0;i<L-1;i++){
-      if((mask>>i)&1){ parts.push(cur); cur=s[i+1]; }else cur+=s[i+1]; 
-    }
+    for(let i=0;i<L-1;i++){ if((mask>>i)&1){ parts.push(cur); cur=s[i+1]; }else cur+=s[i+1]; }
     parts.push(cur);
-    const nums=parts.map(p=>parseInt(p,10));
-    if(nums.some(n=>isNaN(n)||n<=0||n>maxVal)) continue;
+    const nums=parts.map(p=>parseInt(p,10)); if(nums.some(n=>isNaN(n)||n<=0||n>maxVal)) continue;
     if(nums.length<best.count){ best.count=nums.length; best.parts=nums; }
   }
   if(!best.parts) return s.split('').map(ch=>parseInt(ch,10)).filter(n=>n>0);
   return best.parts.map(p=>parseInt(p,10));
 }
 
-// ----- ヒント修正（合計セル数超過防止） -----
+// --- Fix hints exceeding cell counts ---
 function fixHints(hints,maxCells){
   return hints.map(line=>{
     let newLine=[];
@@ -107,14 +90,13 @@ function fixHints(hints,maxCells){
   });
 }
 
-// ----- シンプルSolver（確定マスのみ） -----
+// --- Simple solver (only definite cells) ---
 function solvePicross(rows,cols){
-  const H = rows.length, W=cols.length;
-  const grid = Array.from({length:H},()=>Array(W).fill(null));
-  // 簡易ロジック：行・列に合計がセル数に等しい場合は全マス黒
+  const H=rows.length,W=cols.length;
+  const grid=Array.from({length:H},()=>Array(W).fill(null));
   for(let r=0;r<H;r++){
-    const sum = rows[r].reduce((a,b)=>a+b,0) + rows[r].length-1;
-    if(sum===W) {
+    const sum=rows[r].reduce((a,b)=>a+b,0)+rows[r].length-1;
+    if(sum===W){
       let idx=0;
       for(const v of rows[r]){
         for(let i=0;i<v;i++) grid[r][idx++]=1;
@@ -123,7 +105,7 @@ function solvePicross(rows,cols){
     }
   }
   for(let c=0;c<W;c++){
-    const sum = cols[c].reduce((a,b)=>a+b,0) + cols[c].length-1;
+    const sum=cols[c].reduce((a,b)=>a+b,0)+cols[c].length-1;
     if(sum===H){
       let idx=0;
       for(const v of cols[c]){
@@ -135,52 +117,52 @@ function solvePicross(rows,cols){
   return grid;
 }
 
-// ----- 描画解答 -----
+// --- Draw solution ---
 function renderSolution(grid){
-  const H=grid.length, W=grid[0].length;
+  const H=grid.length,W=grid[0].length;
   solutionCanvas.width=W*20; solutionCanvas.height=H*20;
-  const ctx = solutionCanvas.getContext('2d');
+  const ctx=solutionCanvas.getContext('2d');
   ctx.fillStyle='#fff'; ctx.fillRect(0,0,solutionCanvas.width,solutionCanvas.height);
   ctx.strokeStyle='#888';
   for(let y=0;y<H;y++){
     for(let x=0;x<W;x++){
       ctx.strokeRect(x*20,y*20,20,20);
-      if(grid[y][x]===1){
-        ctx.fillStyle='#000'; ctx.fillRect(x*20+1,y*20+1,18,18);
-      }
+      if(grid[y][x]===1){ ctx.fillStyle='#000'; ctx.fillRect(x*20+1,y*20+1,18,18); }
     }
   }
 }
 
-// ----- メイン処理 -----
+// --- Main ---
 imgInput.addEventListener('change',ev=>{
   const f=ev.target.files[0]; if(!f) return;
-  uploadedImg = new Image();
+  uploadedImg=new Image();
   uploadedImg.onload=async()=>{
-    // 前処理
-    const bin=preprocessImage(uploadedImg,2.5,160);
+    const bin=preprocessImage(uploadedImg,1.5,160);
     preview.width=bin.width; preview.height=bin.height;
     preview.getContext('2d').drawImage(bin,0,0);
 
-    // 仮に左右と上部を全体ヒントとみなす（簡易版）
+    // --- Extract hint clusters ---
     const rowHintArea=cropCanvas(bin,0,0,Math.floor(bin.width*0.2),bin.height);
     const colHintArea=cropCanvas(bin,0,0,bin.width,Math.floor(bin.height*0.2));
 
+    // For speed: OCR small clusters sequentially
+    const rowOCRs=[ocrSingle(rowHintArea)];
+    const colOCRs=[ocrSingle(colHintArea)];
+
+    const rowTexts=await Promise.all(rowOCRs);
+    const colTexts=await Promise.all(colOCRs);
+
     const maxRow=bin.width, maxCol=bin.height;
-    const rowNums = await Promise.all([ocrCluster(rowHintArea,maxRow)]);
-    const colNums = await Promise.all([ocrCluster(colHintArea,maxCol)]);
-    const rows_fixed = fixHints(rowNums,maxRow);
-    const cols_fixed = fixHints(colNums,maxCol);
+    const rows_fixed=rowTexts.map(t=>splitDigitsHeuristic(t,maxRow)).map(r=>fixHints([r],maxRow)[0]);
+    const cols_fixed=colTexts.map(t=>splitDigitsHeuristic(t,maxCol)).map(c=>fixHints([c],maxCol)[0]);
 
-    jsonOut.textContent = JSON.stringify({rows:rows_fixed,cols:cols_fixed});
+    jsonOut.textContent=JSON.stringify({rows:rows_fixed,cols:cols_fixed});
 
-    const solution = solvePicross(rows_fixed,cols_fixed);
+    const solution=solvePicross(rows_fixed,cols_fixed);
     renderSolution(solution);
-
   };
   uploadedImg.src=URL.createObjectURL(f);
 });
-
 </script>
 </body>
 </html>
