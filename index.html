@@ -32,15 +32,15 @@
             console.log("Converted to gray");
 
             let bin = new cv.Mat();
-cv.adaptiveThreshold(
-    gray,
-    bin,
-    255,
-    cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-    cv.THRESH_BINARY_INV,
-    25,
-    10
-);
+        cv.adaptiveThreshold(
+            gray,
+            bin,
+            255,
+            cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv.THRESH_BINARY_INV,
+            25,
+            10
+        );
 
             console.log("Binarized");
 
