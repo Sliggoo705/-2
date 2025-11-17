@@ -2,21 +2,32 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + Filter + Split + Normalize</title>
+<title>Digit Extract + OCR</title>
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
 <style>
 body { font-family: sans-serif; }
 #digits canvas { margin: 4px; border: 1px solid #ccc; }
+#digits div { display: inline-block; text-align: center; margin: 2px; }
 </style>
 </head>
 <body>
 
-<h2>Digit Extract + Filter + Split + 28x28 Normalize</h2>
+<h2>Digit Extract + 28x28 Normalize + MNIST OCR</h2>
 <input type="file" id="fileInput" accept="image/*"><br><br>
 <div id="log"></div>
 <div id="digits"></div>
 
-<script src="https://docs.opencv.org/4.x/opencv.js"></script>
 <script>
+let model = null;
+
+async function loadModel(){
+  model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mnist/model.json');
+  document.getElementById("log").innerHTML += "✔ MNIST model loaded!<br>";
+}
+
+loadModel();
+
 document.addEventListener("DOMContentLoaded", async () => {
   const fileInput = document.getElementById("fileInput");
   const logDiv = document.getElementById("log");
@@ -35,18 +46,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     img.onload = () => processImage(img);
   });
 
-  function processImage(img){
+  async function processImage(img){
     log("=== Start extraction ===");
-
-    // 最大幅600pxで軽量化
     let scale = Math.min(600 / img.width, 1.0);
     let w = Math.round(img.width * scale);
     let h = Math.round(img.height * scale);
-
     let canvas = document.createElement("canvas");
     canvas.width = w; canvas.height = h;
-    let ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, w, h);
+    canvas.getContext("2d").drawImage(img, 0, 0, w, h);
 
     let src = cv.imread(canvas);
     let gray = new cv.Mat();
@@ -54,77 +61,78 @@ document.addEventListener("DOMContentLoaded", async () => {
     let bin = new cv.Mat();
     cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
 
-    // 輪郭検出
     let contours = new cv.MatVector();
     let hierarchy = new cv.Mat();
     cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // 最大矩形を盤面として除外
-    let maxArea = 0, boardRect = null;
+    let maxArea=0, boardRect=null;
     for(let i=0;i<contours.size();i++){
       let r = cv.boundingRect(contours.get(i));
-      let area = r.width * r.height;
-      if(area > maxArea){ maxArea = area; boardRect = r; }
+      let area = r.width*r.height;
+      if(area>maxArea){ maxArea=area; boardRect=r; }
     }
     log("Board area excluded: " + JSON.stringify(boardRect));
 
-    // 候補抽出（サイズ＆盤面外＆上下端フィルタ）
     let candidates = [];
     for(let i=0;i<contours.size();i++){
       let r = cv.boundingRect(contours.get(i));
-      if(r.width < 5 || r.height < 8) continue;       // 小さいノイズ除去
-      if(r.width > 50 || r.height > 40) continue;     // 大きすぎ除去
-      if(r.y < 10 || r.y + r.height > h - 10) continue; // 上下端のノイズ除去
+      if(r.width<5 || r.height<8) continue;
+      if(r.width>50 || r.height>40) continue;
+      if(r.y<10 || r.y+r.height>h-10) continue;
       if(boardRect &&
-         r.x > boardRect.x && r.x + r.width < boardRect.x + boardRect.width &&
-         r.y > boardRect.y && r.y + r.height < boardRect.y + boardRect.height) continue;
+         r.x>boardRect.x && r.x+r.width<boardRect.x+boardRect.width &&
+         r.y>boardRect.y && r.y+r.height<boardRect.y+boardRect.height) continue;
       candidates.push(r);
     }
 
-    log("Candidates before split: " + candidates.length);
+    log("Candidates before split: "+candidates.length);
 
-    // 横長数字分割＆重複統合
-    let finalDigits = [];
+    let finalDigits=[];
     candidates.forEach(r=>{
-      if(r.width > r.height*1.5){ // 横長判定
-        let n = Math.round(r.width / r.height);
+      if(r.width>r.height*1.5){
+        let n=Math.round(r.width/r.height);
         for(let i=0;i<n;i++){
-          finalDigits.push({x: r.x + i*r.height, y: r.y, w: r.height, h: r.height});
+          finalDigits.push({x:r.x+i*r.height, y:r.y, w:r.height, h:r.height});
         }
-      } else {
-        finalDigits.push(r);
-      }
+      }else finalDigits.push(r);
     });
 
-    // 重複矩形統合（近接5px以内）
-    finalDigits.sort((a,b)=>a.y - b.y || a.x - b.x);
-    let merged = [];
+    finalDigits.sort((a,b)=>a.y-b.y||a.x-b.x);
+    let merged=[];
     finalDigits.forEach(r=>{
       let overlap = merged.find(m=>Math.abs(m.x-r.x)<5 && Math.abs(m.y-r.y)<5);
       if(!overlap) merged.push(r);
     });
 
-    log("Total digits after split & merge: " + merged.length);
+    log("Total digits after split & merge: "+merged.length);
 
-    // 28x28に正規化して表示
-    digitsDiv.innerHTML = "";
-    merged.forEach((r, idx)=>{
+    digitsDiv.innerHTML="";
+    for(let idx=0; idx<merged.length; idx++){
+      let r = merged[idx];
       let roi = bin.roi(new cv.Rect(r.x, r.y, r.w, r.h));
-      let size = Math.max(r.w, r.h);
-      let padded = cv.Mat.zeros(size, size, roi.type());
+      let size = Math.max(r.w,r.h);
+      let padded = cv.Mat.zeros(size,size,roi.type());
       roi.copyTo(padded.rowRange(0,r.h).colRange(0,r.w));
       let square = new cv.Mat();
-      cv.resize(padded, square, new cv.Size(28,28), 0,0, cv.INTER_AREA);
+      cv.resize(padded, square, new cv.Size(28,28),0,0,cv.INTER_AREA);
 
+      // OCR
+      let tensor = tf.tensor(Array.from(square.data), [28,28,1], 'float32').div(255).expandDims(0);
+      let pred = model.predict(tensor);
+      let digit = pred.argMax(1).dataSync()[0];
+
+      let container = document.createElement("div");
       let outCanvas = document.createElement("canvas");
-      outCanvas.width = 28; outCanvas.height = 28;
+      outCanvas.width=28; outCanvas.height=28;
       cv.imshow(outCanvas, square);
-      digitsDiv.appendChild(outCanvas);
+      container.appendChild(outCanvas);
+      let label = document.createElement("div");
+      label.innerText=digit;
+      container.appendChild(label);
+      digitsDiv.appendChild(container);
 
-      log(`Digit ${idx+1}: x=${r.x}, y=${r.y}, w=${r.w}, h=${r.h}`);
-
-      roi.delete(); padded.delete(); square.delete();
-    });
+      roi.delete(); padded.delete(); square.delete(); tensor.dispose(); pred.dispose();
+    }
 
     src.delete(); gray.delete(); bin.delete(); contours.delete(); hierarchy.delete();
     log("=== End extraction ===");
