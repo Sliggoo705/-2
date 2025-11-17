@@ -46,8 +46,8 @@ function preprocessImage(img){
         d[i]=d[i+1]=d[i+2]=v;
     }
     ctx.putImageData(im,0,0);
-    // グリッド線除去（横・縦）
-    const w=c.width,h=c.height; const data=ctx.getImageData(0,0,w,h); const pixels=data.data;
+    const w=c.width,h=c.height;
+    const data=ctx.getImageData(0,0,w,h); const pixels=data.data;
     const threshold=0.95;
     for(let y=0;y<h;y++){
         let black=0; for(let x=0;x<w;x++){ if(pixels[(y*w+x)*4]<128) black++; }
@@ -70,12 +70,11 @@ async function recognizeDigit(cluster){
     for(let i=0;i<imgData.data.length;i+=4){ arr.push(imgData.data[i]<128?1:0); }
     const tensor=tf.tensor(arr,[1,28,28,1]);
     const pred=model.predict(tensor);
-    const digit=pred.argMax(-1).dataSync()[0];
-    return digit;
+    return pred.argMax(-1).dataSync()[0];
 }
 
-// --- 投影でクラスタ抽出（行ヒント例） ---
-function extractClusters(canvas, isRow=true){
+// --- クラスタ抽出 ---
+function extractClusters(canvas,isRow=true){
     const ctx=canvas.getContext('2d');
     const w=canvas.width,h=canvas.height;
     const data=ctx.getImageData(0,0,w,h).data;
@@ -85,7 +84,7 @@ function extractClusters(canvas, isRow=true){
     }else{
         for(let x=0;x<w;x++){ let sum=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
     }
-    const clusters=[]; let inC=false, start=0;
+    const clusters=[]; let inC=false,start=0;
     for(let i=0;i<proj.length;i++){
         if(!inC && proj[i]>0){ inC=true; start=i; }
         else if(inC && proj[i]===0){ inC=false; clusters.push([start,i]); }
@@ -94,7 +93,28 @@ function extractClusters(canvas, isRow=true){
     return clusters;
 }
 
-// --- Solver（簡易） ---
+// --- クラスタ内の数字分割 ---
+function splitCluster(clusterCanvas,isRow=true){
+    const ctx=clusterCanvas.getContext('2d');
+    const w=clusterCanvas.width,h=clusterCanvas.height;
+    const data=ctx.getImageData(0,0,w,h).data;
+    const proj=[];
+    if(isRow){
+        for(let x=0;x<w;x++){ let sum=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
+    }else{
+        for(let y=0;y<h;y++){ let sum=0; for(let x=0;x<w;x++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
+    }
+    const splits=[]; let inDigit=false,start=0;
+    for(let i=0;i<proj.length;i++){
+        if(!inDigit && proj[i]>0){ inDigit=true; start=i; }
+        else if(inDigit && proj[i]===0){ inDigit=false; splits.push([start,i]); }
+    }
+    if(inDigit) splits.push([start,proj.length]);
+    return splits.map(([start,end])=>isRow?cropCanvas(clusterCanvas,start,0,end-start,h)
+                                         :cropCanvas(clusterCanvas,0,start,w,end-start));
+}
+
+// --- Solver ---
 function solvePicross(rows,cols){
     const H=rows.length,W=cols.length;
     const grid=Array.from({length:H},()=>Array(W).fill(null));
@@ -133,23 +153,26 @@ imgInput.addEventListener('change',async ev=>{
         preview.width=bin.width; preview.height=bin.height;
         preview.getContext('2d').drawImage(bin,0,0);
 
-        const H=15,W=15; // 仮設定
         const rows=[],cols=[];
-
-        // 行ヒント領域の自動切り出し
+        // 行ヒント領域
         const rowArea=cropCanvas(bin,0,0,Math.floor(bin.width*0.2),bin.height);
         const rowClusters=extractClusters(rowArea,true);
         for(const [start,end] of rowClusters){
-            const clusterImg=cropCanvas(rowArea,0,start,rowArea.width,end-start);
-            rows.push([await recognizeDigit(clusterImg)]); // 複数数字分割は必要に応じて追加
+            const cluster=cropCanvas(rowArea,0,start,rowArea.width,end-start);
+            const digits=splitCluster(cluster,true);
+            const rowDigits=[];
+            for(const d of digits){ rowDigits.push(await recognizeDigit(d)); }
+            rows.push(rowDigits);
         }
-
-        // 列ヒント領域の自動切り出し
+        // 列ヒント領域
         const colArea=cropCanvas(bin,0,0,bin.width,Math.floor(bin.height*0.2));
         const colClusters=extractClusters(colArea,false);
         for(const [start,end] of colClusters){
-            const clusterImg=cropCanvas(colArea,start,0,end-start,colArea.height);
-            cols.push([await recognizeDigit(clusterImg)]); // 複数数字分割は必要に応じて追加
+            const cluster=cropCanvas(colArea,start,0,end-start,colArea.height);
+            const digits=splitCluster(cluster,false);
+            const colDigits=[];
+            for(const d of digits){ colDigits.push(await recognizeDigit(d)); }
+            cols.push(colDigits);
         }
 
         jsonOut.textContent=JSON.stringify({rows,cols});
