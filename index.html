@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + 28x28 Normalize (Final)</title>
+<title>Digit Extract + 28x28 Normalize (Stable Final)</title>
 <style>
   body { font-family: sans-serif; }
   #digits canvas {
@@ -13,7 +13,7 @@
 </head>
 
 <body>
-<h2>Digit Extract + 28x28 Normalize (Final)</h2>
+<h2>Digit Extract + 28x28 Normalize (Stable Final)</h2>
 
 <input type="file" id="fileInput" accept="image/*"><br><br>
 
@@ -44,7 +44,7 @@ document.getElementById("fileInput").addEventListener("change", (e) => {
 });
 
 // ----------------------------
-// 最終版：横方向閾値拡大 + 繰り返しマージ + 矩形重なり + 28x28正規化
+// 横ヒントライン分割 + 縦横比チェック + 繰り返しマージ + 28x28正規化
 // ----------------------------
 function extractDigits(img) {
     log("=== Start extraction ===");
@@ -82,57 +82,68 @@ function extractDigits(img) {
     let candidates = [];
     for (let i = 0; i < contours.size(); i++) {
         let rect = cv.boundingRect(contours.get(i));
-        let x=rect.x, y=rect.y, w=rect.width, h=rect.height;
         if (boardRect &&
-            x > boardRect.x - 5 &&
-            x + w < boardRect.x + boardRect.width + 5 &&
-            y > boardRect.y - 5 &&
-            y + h < boardRect.y + boardRect.height + 5) continue;
-        if (w > 40 || h > 40 || w < 8 || h < 8) continue; // サイズフィルタ
+            rect.x > boardRect.x - 5 &&
+            rect.x + rect.width < boardRect.x + boardRect.width + 5 &&
+            rect.y > boardRect.y - 5 &&
+            rect.y + rect.height < boardRect.y + boardRect.height + 5) continue;
+        if (rect.width < 8 || rect.height < 8 || rect.width > 60 || rect.height > 60) continue; // サイズフィルタ
         candidates.push(Object.assign({}, rect));
     }
 
-    // 中心距離 + 矩形重なりによるマージ
-    function center(rect) {
-        return {cx: rect.x + rect.width/2, cy: rect.y + rect.height/2};
-    }
+    // 中心距離 + 矩形重なり + 縦横比チェックによるマージ
+    function center(rect) { return {cx: rect.x + rect.width/2, cy: rect.y + rect.height/2}; }
     function intersect(r1,r2){
         return !(r2.x > r1.x + r1.width || r2.x + r2.width < r1.x ||
                  r2.y > r1.y + r1.height || r2.y + r2.height < r1.y);
     }
 
-    let merged = [];
-    const xThreshold = 30; // 横方向は広め
-    const yThreshold = 15; // 縦方向は小さめ
-    candidates.forEach(r => merged.push(Object.assign({}, r)));
+    // 横ヒントラインごとに分けてマージ
+    const yLineThreshold = 15;
+    const xThreshold = 25;
+    const yThreshold = 15;
 
-    let changed = true;
-    while(changed){
-        changed = false;
-        let newMerged = [];
-        let used = Array(merged.length).fill(false);
-        for(let i=0;i<merged.length;i++){
-            if(used[i]) continue;
-            let m = Object.assign({}, merged[i]);
-            for(let j=i+1;j<merged.length;j++){
-                if(used[j]) continue;
-                let r = merged[j];
-                let c1 = center(m), c2 = center(r);
-                if(intersect(m,r) || (Math.abs(c1.cx-c2.cx)<=xThreshold && Math.abs(c1.cy-c2.cy)<=yThreshold)){
-                    // マージ
-                    let x1 = Math.min(m.x,r.x);
-                    let y1 = Math.min(m.y,r.y);
-                    let x2 = Math.max(m.x+m.width, r.x+r.width);
-                    let y2 = Math.max(m.y+m.height, r.y+r.height);
-                    m.x = x1; m.y = y1; m.width = x2-x1; m.height = y2-y1;
-                    used[j] = true;
-                    changed = true;
-                }
-            }
-            newMerged.push(m);
+    candidates.sort((a,b)=>a.y-b.y); // 上から順に
+    let lines = [];
+    candidates.forEach(r=>{
+        let added=false;
+        for(let line of lines){
+            if(Math.abs(line[0].y - r.y) <= yLineThreshold){ line.push(r); added=true; break; }
         }
-        merged = newMerged;
-    }
+        if(!added) lines.push([r]);
+    });
+
+    let merged = [];
+    lines.forEach(line=>{
+        let temp = line.map(r=>Object.assign({}, r));
+        let changed=true;
+        while(changed){
+            changed=false;
+            let newTemp=[];
+            let used = Array(temp.length).fill(false);
+            for(let i=0;i<temp.length;i++){
+                if(used[i]) continue;
+                let m = Object.assign({}, temp[i]);
+                for(let j=i+1;j<temp.length;j++){
+                    if(used[j]) continue;
+                    let r = temp[j];
+                    let c1 = center(m), c2 = center(r);
+                    let ratio = Math.max(r.width/r.height, r.height/r.width);
+                    if(intersect(m,r) || ((Math.abs(c1.cx-c2.cx)<=xThreshold && Math.abs(c1.cy-c2.cy)<=yThreshold && ratio<2))){
+                        let x1 = Math.min(m.x,r.x);
+                        let y1 = Math.min(m.y,r.y);
+                        let x2 = Math.max(m.x+m.width, r.x+r.width);
+                        let y2 = Math.max(m.y+m.height, r.y+r.height);
+                        m.x = x1; m.y = y1; m.width = x2-x1; m.height = y2-y1;
+                        used[j]=true; changed=true;
+                    }
+                }
+                newTemp.push(m);
+            }
+            temp=newTemp;
+        }
+        merged.push(...temp);
+    });
 
     log("Total merged digits: " + merged.length);
 
