@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + 28x28 Normalize</title>
+<title>Digit Extract + 28x28 Normalize (Center Merge)</title>
 <style>
   body { font-family: sans-serif; }
   #digits canvas {
@@ -13,14 +13,13 @@
 </head>
 
 <body>
-<h2>Digit Extract + 28x28 Normalize</h2>
+<h2>Digit Extract + 28x28 Normalize (Center Merge)</h2>
 
 <input type="file" id="fileInput" accept="image/*"><br><br>
 
 <div id="log"></div>
 <div id="digits"></div>
 
-<!-- OpenCV.js -->
 <script async src="https://docs.opencv.org/4.x/opencv.js" onload="cvLoaded()"></script>
 
 <script>
@@ -36,12 +35,8 @@ function cvLoaded() {
     };
 }
 
-// 画像アップロードイベント
 document.getElementById("fileInput").addEventListener("change", (e) => {
-    if (!cvReady) {
-        alert("OpenCV is not ready yet. Wait 1–2 seconds.");
-        return;
-    }
+    if (!cvReady) { alert("OpenCV is not ready yet."); return; }
     const file = e.target.files[0];
     const img = new Image();
     img.src = URL.createObjectURL(file);
@@ -49,7 +44,7 @@ document.getElementById("fileInput").addEventListener("change", (e) => {
 });
 
 // ----------------------------
-// 重複マージ＋28x28正規化
+// 中心距離ベースの重複マージ + 28x28正規化
 // ----------------------------
 function extractDigits(img) {
     log("=== Start extraction ===");
@@ -83,43 +78,46 @@ function extractDigits(img) {
     }
     log("Board area (excluded): " + JSON.stringify(boardRect));
 
-    // 数字候補リスト
+    // 数字候補
     let candidates = [];
     for (let i = 0; i < contours.size(); i++) {
         let rect = cv.boundingRect(contours.get(i));
-        let x = rect.x, y = rect.y, w = rect.width, h = rect.height;
-
-        // 盤面領域は除外
+        let x=rect.x, y=rect.y, w=rect.width, h=rect.height;
         if (boardRect &&
             x > boardRect.x - 5 &&
             x + w < boardRect.x + boardRect.width + 5 &&
             y > boardRect.y - 5 &&
             y + h < boardRect.y + boardRect.height + 5) continue;
-
         if (w > 40 || h > 40 || w < 8 || h < 8) continue; // サイズフィルタ
         candidates.push(rect);
     }
 
-    // 近接重複マージ
+    // 中心距離ベースで重複マージ
+    function center(rect) {
+        return {cx: rect.x + rect.width/2, cy: rect.y + rect.height/2};
+    }
+
     let merged = [];
-    const threshold = 5; // px
+    const xThreshold = 15; // 横距離閾値
+    const yThreshold = 15; // 縦距離閾値
+
     candidates.forEach(r => {
         let mergedFlag = false;
+        let rc = center(r);
         for (let m of merged) {
-            if (Math.abs(r.x - m.x) <= threshold &&
-                Math.abs(r.y - m.y) <= threshold &&
-                Math.abs(r.width - m.width) <= threshold &&
-                Math.abs(r.height - m.height) <= threshold) {
+            let mc = center(m);
+            if (Math.abs(rc.cx - mc.cx) <= xThreshold && Math.abs(rc.cy - mc.cy) <= yThreshold) {
                 // マージ
-                m.x = Math.min(m.x, r.x);
-                m.y = Math.min(m.y, r.y);
-                m.width = Math.max(m.x + m.width, r.x + r.width) - m.x;
-                m.height = Math.max(m.y + m.height, r.y + r.height) - m.y;
+                let x1 = Math.min(m.x, r.x);
+                let y1 = Math.min(m.y, r.y);
+                let x2 = Math.max(m.x + m.width, r.x + r.width);
+                let y2 = Math.max(m.y + m.height, r.y + r.height);
+                m.x = x1; m.y = y1; m.width = x2 - x1; m.height = y2 - y1;
                 mergedFlag = true;
                 break;
             }
         }
-        if (!mergedFlag) merged.push(r);
+        if (!mergedFlag) merged.push(Object.assign({}, r));
     });
 
     log("Total merged digits: " + merged.length);
@@ -130,12 +128,12 @@ function extractDigits(img) {
     // 28x28正規化
     merged.forEach((rect, idx) => {
         let roi = bin.roi(new cv.Rect(rect.x, rect.y, rect.width, rect.height));
-        let square = new cv.Mat();
         let size = Math.max(rect.width, rect.height);
         let padded = cv.Mat.zeros(size, size, roi.type());
         roi.copyTo(padded.rowRange(0, rect.height).colRange(0, rect.width));
 
-        cv.resize(padded, square, new cv.Size(28, 28), 0, 0, cv.INTER_AREA);
+        let square = new cv.Mat();
+        cv.resize(padded, square, new cv.Size(28,28), 0, 0, cv.INTER_AREA);
 
         let canvas = document.createElement("canvas");
         canvas.width = 28; canvas.height = 28;
