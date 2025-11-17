@@ -1,189 +1,57 @@
-<!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
-<meta charset="utf-8">
-<title>Picross CNN OCR 高速版</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
-<style>
-body{font-family:Arial,sans-serif;margin:16px;}
-canvas{border:1px solid #ccc; display:block;margin-top:10px;}
-pre{background:#f8f8f8;padding:10px;overflow-x:auto;}
-</style>
+    <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+    <script>
+        function debugOCR(imgElement) {
+            console.log("=== Debug start ===");
+
+            const src = cv.imread(imgElement);
+            console.log("Loaded image:", src.cols, "x", src.rows);
+
+            let gray = new cv.Mat();
+            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+            console.log("Converted to gray");
+
+            let bin = new cv.Mat();
+            cv.threshold(gray, bin, 180, 255, cv.THRESH_BINARY_INV);
+            console.log("Binarized");
+
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(
+                bin,
+                contours,
+                hierarchy,
+                cv.RETR_EXTERNAL,
+                cv.CHAIN_APPROX_SIMPLE
+            );
+
+            console.log("Contours found:", contours.size());
+
+            let validCount = 0;
+            for (let i = 0; i < contours.size(); i++) {
+                const rect = cv.boundingRect(contours.get(i));
+                if (rect.width < 8 || rect.height < 8) continue;
+                validCount++;
+                console.log(
+                    `Valid contour #${validCount}:`,
+                    `x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}`
+                );
+            }
+
+            console.log("Valid digit candidates:", validCount);
+            console.log("=== Debug end ===");
+        }
+
+        // OpenCV読み込み後に実行
+        document.addEventListener("opencvready", () => {
+            const img = document.getElementById("puzzle");
+            debugOCR(img);
+        });
+    </script>
 </head>
+
 <body>
-<h2>Picross CNN OCR 高速版</h2>
-<input type="file" id="imgInput" accept="image/*">
-<canvas id="preview"></canvas>
-<canvas id="solution"></canvas>
-<pre id="jsonOut">JSON結果はここに表示</pre>
-
-<script>
-const imgInput=document.getElementById('imgInput');
-const preview=document.getElementById('preview');
-const solutionCanvas=document.getElementById('solution');
-const jsonOut=document.getElementById('jsonOut');
-let model=null;
-
-// --- MNIST互換CNNモデルロード ---
-async function loadModel(){
-    model = await tf.loadLayersModel('https://.../mnist_cnn/model.json'); // 適切なモデルURLを指定
-}
-loadModel();
-
-// --- Canvas helper ---
-function makeCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
-function cropCanvas(src,x,y,w,h){ const c=makeCanvas(w,h); c.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h); return c; }
-
-// --- 前処理 ---
-function preprocessImage(img){
-    // 画像を縮小して高速化
-    const scale = 0.5; // 元画像が大きい場合はさらに小さく
-    const w=Math.floor(img.width*scale), h=Math.floor(img.height*scale);
-    const c=makeCanvas(w,h);
-    const ctx=c.getContext('2d');
-    ctx.drawImage(img,0,0,w,h);
-    const im=ctx.getImageData(0,0,w,h);
-    const d=im.data;
-    for(let i=0;i<d.length;i+=4){
-        const v=(d[i]+d[i+1]+d[i+2])/3>160?255:0;
-        d[i]=d[i+1]=d[i+2]=v;
-    }
-    ctx.putImageData(im,0,0);
-    // グリッド線除去（横・縦）
-    const data=ctx.getImageData(0,0,w,h); const pixels=data.data;
-    const threshold=0.95;
-    for(let y=0;y<h;y++){
-        let black=0; for(let x=0;x<w;x++){ if(pixels[(y*w+x)*4]<128) black++; }
-        if(black/w>threshold){ for(let x=0;x<w;x++){ const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255; } }
-    }
-    for(let x=0;x<w;x++){
-        let black=0; for(let y=0;y<h;y++){ if(pixels[(y*w+x)*4]<128) black++; }
-        if(black/h>threshold){ for(let y=0;y<h;y++){ const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255; } }
-    }
-    ctx.putImageData(data,0,0);
-    return c;
-}
-
-// --- CNNで数字分類 ---
-async function recognizeDigit(cluster){
-    const c28=makeCanvas(28,28);
-    c28.getContext('2d').drawImage(cluster,0,0,28,28);
-    const imgData=c28.getContext('2d').getImageData(0,0,28,28);
-    let arr=[];
-    for(let i=0;i<imgData.data.length;i+=4){ arr.push(imgData.data[i]<128?1:0); }
-    const tensor=tf.tensor(arr,[1,28,28,1]);
-    const pred=model.predict(tensor);
-    return pred.argMax(-1).dataSync()[0];
-}
-
-// --- クラスタ抽出 ---
-function extractClusters(canvas,isRow=true){
-    const ctx=canvas.getContext('2d');
-    const w=canvas.width,h=canvas.height;
-    const data=ctx.getImageData(0,0,w,h).data;
-    const proj=[];
-    if(isRow){
-        for(let y=0;y<h;y++){ let sum=0; for(let x=0;x<w;x++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
-    }else{
-        for(let x=0;x<w;x++){ let sum=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
-    }
-    const clusters=[]; let inC=false,start=0;
-    for(let i=0;i<proj.length;i++){
-        if(!inC && proj[i]>0){ inC=true; start=i; }
-        else if(inC && proj[i]===0){ inC=false; clusters.push([start,i]); }
-    }
-    if(inC) clusters.push([start,proj.length]);
-    return clusters;
-}
-
-// --- クラスタ内複数数字分割 ---
-function splitCluster(clusterCanvas,isRow=true){
-    const ctx=clusterCanvas.getContext('2d');
-    const w=clusterCanvas.width,h=clusterCanvas.height;
-    const data=ctx.getImageData(0,0,w,h).data;
-    const proj=[];
-    if(isRow){
-        for(let x=0;x<w;x++){ let sum=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
-    }else{
-        for(let y=0;y<h;y++){ let sum=0; for(let x=0;x<w;x++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
-    }
-    const splits=[]; let inDigit=false,start=0;
-    for(let i=0;i<proj.length;i++){
-        if(!inDigit && proj[i]>0){ inDigit=true; start=i; }
-        else if(inDigit && proj[i]===0){ inDigit=false; splits.push([start,i]); }
-    }
-    if(inDigit) splits.push([start,proj.length]);
-    return splits.map(([start,end])=>isRow?cropCanvas(clusterCanvas,start,0,end-start,h)
-                                         :cropCanvas(clusterCanvas,0,start,w,end-start));
-}
-
-// --- Solver ---
-function solvePicross(rows,cols){
-    const H=rows.length,W=cols.length;
-    const grid=Array.from({length:H},()=>Array(W).fill(null));
-    for(let r=0;r<H;r++){
-        const sum=rows[r].reduce((a,b)=>a+b,0)+rows[r].length-1;
-        if(sum===W){ let idx=0; for(const v of rows[r]){ for(let i=0;i<v;i++) grid[r][idx++]=1; if(idx<W) idx++; } }
-    }
-    for(let c=0;c<W;c++){
-        const sum=cols[c].reduce((a,b)=>a+b,0)+cols[c].length-1;
-        if(sum===H){ let idx=0; for(const v of cols[c]){ for(let i=0;i<v;i++) grid[idx++][c]=1; if(idx<H) idx++; } }
-    }
-    return grid;
-}
-
-// --- 描画 ---
-function renderSolution(grid){
-    const H=grid.length,W=grid[0].length;
-    solutionCanvas.width=W*20; solutionCanvas.height=H*20;
-    const ctx=solutionCanvas.getContext('2d');
-    ctx.fillStyle='#fff'; ctx.fillRect(0,0,solutionCanvas.width,solutionCanvas.height);
-    ctx.strokeStyle='#888';
-    for(let y=0;y<H;y++){
-        for(let x=0;x<W;x++){
-            ctx.strokeRect(x*20,y*20,20,20);
-            if(grid[y][x]===1){ ctx.fillStyle='#000'; ctx.fillRect(x*20+1,y*20+1,18,18); }
-        }
-    }
-}
-
-// --- Main ---
-imgInput.addEventListener('change',async ev=>{
-    const f=ev.target.files[0]; if(!f) return;
-    const img=new Image();
-    img.onload=async()=>{
-        const bin=preprocessImage(img);
-        preview.width=bin.width; preview.height=bin.height;
-        preview.getContext('2d').drawImage(bin,0,0);
-
-        const rows=[],cols=[];
-        // 行ヒント領域
-        const rowArea=cropCanvas(bin,0,0,Math.floor(bin.width*0.2),bin.height);
-        const rowClusters=extractClusters(rowArea,true);
-        for(const [start,end] of rowClusters){
-            const cluster=cropCanvas(rowArea,0,start,rowArea.width,end-start);
-            const digits=splitCluster(cluster,true);
-            // --- 並列化 ---
-            const rowDigits = await Promise.all(digits.map(d=>recognizeDigit(d)));
-            rows.push(rowDigits);
-        }
-
-        // 列ヒント領域
-        const colArea=cropCanvas(bin,0,0,bin.width,Math.floor(bin.height*0.2));
-        const colClusters=extractClusters(colArea,false);
-        for(const [start,end] of colClusters){
-            const cluster=cropCanvas(colArea,start,0,end-start,colArea.height);
-            const digits=splitCluster(cluster,false);
-            const colDigits = await Promise.all(digits.map(d=>recognizeDigit(d)));
-            cols.push(colDigits);
-        }
-
-        jsonOut.textContent=JSON.stringify({rows,cols});
-        const solution=solvePicross(rows,cols);
-        renderSolution(solution);
-    };
-    img.src=URL.createObjectURL(f);
-});
-</script>
+    <img id="puzzle" src="your_image.png">
 </body>
 </html>
