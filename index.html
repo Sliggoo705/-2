@@ -1,25 +1,121 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
-<meta charset="UTF-8">
-<title>Picross OCR Test</title>
-<script src="https://docs.opencv.org/4.7.0/opencv.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
+<meta charset="utf-8" />
+<title>Digit OCR Test</title>
 <style>
-  #canvasOutput { border:1px solid blue; }
+  body { font-family: sans-serif; padding: 20px; }
+  #preview { max-width: 300px; margin-top: 10px; }
+  #log { white-space: pre; background:#eee; padding:10px; margin-top:15px; }
 </style>
 </head>
 <body>
-<h3>画像を選択してください</h3>
-<input type="file" id="fileInput" accept="image/*">
-<canvas id="canvasOutput"></canvas>
-<pre id="log"></pre>
+
+<h2>OpenCV + TFJS Digit OCR</h2>
+
+<input type="file" id="fileInput"><br>
+<img id="preview"><br>
+
+<canvas id="canvas" style="display:none;"></canvas>
+
+<div id="log"></div>
+
+<!-- Load OpenCV.js -->
+<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="cvReady()"></script>
+
+<!-- Load TensorFlow.js -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.16.0/dist/tf.min.js"></script>
 
 <script>
-const log = (msg) => { document.getElementById('log').textContent += msg + '\n'; };
+let model = null;
+let cvOk = false;
 
-// MNISTモデル読み込み用
-let model;
-async function loadModel() {
-    log("Loading MNIST model...");
-    model = await tf.loadLayersModel('https://
+function log(t){
+  document.getElementById("log").textContent += t + "\n";
+}
+
+/* === OpenCV ready === */
+function cvReady(){
+  cvOk = true;
+  log("✔ OpenCV.js ready!");
+}
+
+/* === Load MNIST model === */
+async function loadModel(){
+  log("Loading MNIST model…");
+  model = await tf.loadLayersModel(
+    "https://storage.googleapis.com/learnjs-data/model-builder/mnist/model.json"
+  );
+  log("✔ MNIST model loaded.");
+}
+
+/* === Predict digit === */
+function predictDigit(mat){
+  return tf.tidy(() => {
+    // OpenCV Mat → Tensor
+    let img = tf.tensor(mat.data, [mat.rows, mat.cols, 1], "float32");
+    img = img.div(255);
+    img = tf.image.resizeBilinear(img.expandDims(0), [28,28]);
+    let pred = model.predict(img);
+    return pred.argMax(1).dataSync()[0];
+  });
+}
+
+/* === Main === */
+document.getElementById("fileInput").onchange = async function(e){
+  if(!cvOk){
+    log("OpenCV not ready yet.");
+    return;
+  }
+
+  if(!model){
+    await loadModel();
+  }
+
+  let file = e.target.files[0];
+  document.getElementById("preview").src = URL.createObjectURL(file);
+
+  await new Promise(r => setTimeout(r, 50)); // Wait for preview load
+
+  let img = document.getElementById("preview");
+  let canvas = document.getElementById("canvas");
+  let ctx = canvas.getContext("2d");
+
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  ctx.drawImage(img, 0, 0);
+
+  let src = cv.imread(canvas);
+  cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY);
+
+  // 閾値処理
+  let bin = new cv.Mat();
+  cv.threshold(src, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+
+  // 輪郭抽出
+  let contours = new cv.MatVector();
+  let hierarchy = new cv.Mat();
+  cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  log("=== Start OCR ===");
+  log("Found contours: " + contours.size());
+
+  for(let i=0;i<contours.size();i++){
+    let r = cv.boundingRect(contours.get(i));
+    if(r.width < 10 || r.height < 10) continue;
+
+    let digitROI = bin.roi(r);
+    let num = predictDigit(digitROI);
+
+    log(`Digit ${i+1}: (${r.x},${r.y}) → ${num}`);
+
+    digitROI.delete();
+  }
+
+  log("=== End OCR ===");
+
+  src.delete(); bin.delete(); contours.delete(); hierarchy.delete();
+};
+</script>
+</body>
+</html>
