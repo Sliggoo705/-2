@@ -1,86 +1,53 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+<meta charset="utf-8">
+<title>OpenCV Load Test</title>
+</head>
+<body>
+<h2>OpenCV debug test</h2>
 
-    <script>
-        cv['onRuntimeInitialized'] = () => {
-            console.log("OpenCV loaded!");
-        };
+<input type="file" id="fileInput">
+<br><br>
+<canvas id="canvasOutput"></canvas>
 
-        function handleFile(ev) {
-            const file = ev.target.files[0];
-            if (!file) return;
+<!-- OpenCV.js -->
+<script async
+    src="https://docs.opencv.org/4.10.0/opencv.js"
+    onload="onOpenCvReady();">
+</script>
 
-            const img = document.getElementById("puzzle");
-            img.src = URL.createObjectURL(file);
+<script>
+function onOpenCvReady() {
+    console.log("OpenCV is ready!");
 
-            img.onload = () => {
-                debugOCR(img);
-            };
-        }
+    const input = document.getElementById('fileInput');
+    input.addEventListener('change', function(e) {
+        let img = new Image();
+        img.onload = function () {
+            let canvas = document.getElementById("canvasOutput");
+            canvas.width = img.width;
+            canvas.height = img.height;
+            let ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
 
-        function debugOCR(imgElement) {
-            console.log("=== Debug start ===");
+            console.log("Image loaded:", img.width, img.height);
 
-            const src = cv.imread(imgElement);
-            console.log("Loaded image:", src.cols, "x", src.rows);
+            // OpenCV読み込み成功が確認できる最小処理
+            let src = cv.imread(canvas);
+            console.log("cv.imread OK");
 
             let gray = new cv.Mat();
             cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-            console.log("Converted to gray");
+            console.log("cv.cvtColor OK");
 
-            let bin = new cv.Mat();
-        cv.adaptiveThreshold(
-            gray,
-            bin,
-            255,
-            cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv.THRESH_BINARY_INV,
-            25,
-            10
-        );
+            src.delete();
+            gray.delete();
+        };
+        img.src = URL.createObjectURL(e.target.files[0]);
+    });
+}
+</script>
 
-            console.log("Binarized");
-
-            let contours = new cv.MatVector();
-            let hierarchy = new cv.Mat();
-            cv.findContours(
-                bin,
-                contours,
-                hierarchy,
-                cv.RETR_EXTERNAL,
-                cv.CHAIN_APPROX_SIMPLE
-            );
-
-            console.log("Contours found:", contours.size());
-
-            let validCount = 0;
-            for (let i = 0; i < contours.size(); i++) {
-                const rect = cv.boundingRect(contours.get(i));
-                if (rect.width < 10 || rect.width > 40) continue;
-                if (rect.height < 10 || rect.height > 40) continue;
-
-                validCount++;
-                console.log(
-                    `Valid contour #${validCount}:`,
-                    `x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}`
-                );
-            }
-
-            console.log("Valid digit candidates:", validCount);
-            console.log("=== Debug end ===");
-        }
-    </script>
-</head>
-
-<body>
-    <h2>画像をアップロードしてください</h2>
-
-    <input type="file" accept="image/*" onchange="handleFile(event)">
-    <br><br>
-
-    <img id="puzzle" style="max-width: 300px;">
 </body>
 </html>
