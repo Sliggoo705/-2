@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + 28x28 Normalize (Ultimate Fixed)</title>
+<title>Digit Extract + 28x28 Normalize (Stable Ultimate)</title>
 <style>
   body { font-family: sans-serif; }
   #digits canvas {
@@ -13,7 +13,7 @@
 </head>
 
 <body>
-<h2>Digit Extract + 28x28 Normalize (Ultimate Fixed)</h2>
+<h2>Digit Extract + 28x28 Normalize (Stable Ultimate)</h2>
 
 <input type="file" id="fileInput" accept="image/*"><br><br>
 
@@ -43,11 +43,26 @@ let checkCv = setInterval(()=>{
     }
 },100);
 
+// OpenCVロード完了を待機する関数
+function waitForCvReady(){
+    return new Promise(resolve=>{
+        const check = setInterval(()=>{
+            if(cvReady){
+                clearInterval(check);
+                resolve();
+            }
+        },50);
+    });
+}
+
 // --------------------------
 // 画像選択時
 // --------------------------
-document.getElementById("fileInput").addEventListener("change", (e) => {
-    if(!cvReady){ alert("OpenCV.js is not ready yet."); return; }
+document.getElementById("fileInput").addEventListener("change", async (e) => {
+    if(!cvReady){
+        log("OpenCV.js is not ready yet. Waiting...");
+        await waitForCvReady();
+    }
     const file = e.target.files[0];
     const img = new Image();
     img.src = URL.createObjectURL(file);
@@ -96,111 +111,4 @@ function extractDigits(img){
         let rect=cv.boundingRect(contours.get(i));
         if(boardRect &&
            rect.x>boardRect.x-5 &&
-           rect.x+rect.width<boardRect.x+boardRect.width+5 &&
-           rect.y>boardRect.y-5 &&
-           rect.y+rect.height<boardRect.y+boardRect.height+5) continue;
-        if(rect.width<8 || rect.height<8 || rect.width>100 || rect.height>60) continue;
-        candidates.push(Object.assign({}, rect));
-    }
-
-    // --------------------------
-    // 横ライン統合
-    // --------------------------
-    function center(r){ return {cx:r.x+r.width/2, cy:r.y+r.height/2}; }
-    function intersect(r1,r2){
-        return !(r2.x>r1.x+r1.width || r2.x+r2.width<r1.x || r2.y>r1.y+r1.height || r2.y+r2.height<r1.y);
-    }
-
-    const yThreshold = 15;
-    let lines=[];
-    candidates.sort((a,b)=>a.y-b.y);
-    candidates.forEach(r=>{
-        let added=false;
-        for(let line of lines){
-            if(Math.abs(line[0].y - r.y)<=yThreshold){ line.push(r); added=true; break; }
-        }
-        if(!added) lines.push([r]);
-    });
-
-    let merged=[];
-    lines.forEach(line=>{
-        // 中心x順
-        line.sort((a,b)=>(a.x+a.width/2)-(b.x+b.width/2));
-
-        // 隣接統合
-        let temp=line.map(r=>Object.assign({}, r));
-        let changed=true;
-        while(changed){
-            changed=false;
-            let newTemp=[];
-            let used=Array(temp.length).fill(false);
-            for(let i=0;i<temp.length;i++){
-                if(used[i]) continue;
-                let m=Object.assign({}, temp[i]);
-                for(let j=i+1;j<temp.length;j++){
-                    if(used[j]) continue;
-                    let r=temp[j];
-                    let c1=center(m), c2=center(r);
-                    let xDist=Math.abs(c1.cx-c2.cx);
-                    let threshold=Math.max(m.width,r.width)*1.2;
-                    if(intersect(m,r)||xDist<=threshold){
-                        let x1=Math.min(m.x,r.x), y1=Math.min(m.y,r.y);
-                        let x2=Math.max(m.x+m.width, r.x+r.width);
-                        let y2=Math.max(m.y+m.height, r.y+r.height);
-                        m.x=x1; m.y=y1; m.width=x2-x1; m.height=y2-y1;
-                        used[j]=true; changed=true;
-                    }
-                }
-                newTemp.push(m);
-            }
-            temp=newTemp;
-        }
-
-        // 横長矩形自動分割
-        temp.forEach(r=>{
-            if(r.width/r.height>2.0){
-                let n=Math.round(r.width/r.height);
-                let wUnit=Math.floor(r.width/n);
-                for(let k=0;k<n;k++){
-                    merged.push({x:r.x+k*wUnit, y:r.y, width:wUnit, height:r.height});
-                }
-            }else merged.push(r);
-        });
-    });
-
-    log("Total merged digits: "+merged.length);
-
-    // --------------------------
-    // 28x28正規化と表示
-    // --------------------------
-    const container=document.getElementById("digits");
-    container.innerHTML="";
-
-    merged.forEach((rect,idx)=>{
-        let roi=bin.roi(new cv.Rect(rect.x, rect.y, rect.width, rect.height));
-        let size=Math.max(rect.width, rect.height);
-        let padded=cv.Mat.zeros(size,size,roi.type());
-        roi.copyTo(padded.rowRange(0,rect.height).colRange(0,rect.width));
-
-        let square=new cv.Mat();
-        cv.resize(padded, square, new cv.Size(28,28),0,0,cv.INTER_AREA);
-
-        let canvas=document.createElement("canvas");
-        canvas.width=28; canvas.height=28;
-        cv.imshow(canvas,square);
-        container.appendChild(canvas);
-
-        log(`Digit ${idx+1}: x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}`);
-
-        roi.delete(); padded.delete(); square.delete();
-    });
-
-    src.delete(); gray.delete(); bin.delete(); kernel.delete();
-    contours.delete(); hierarchy.delete();
-
-    log("=== End extraction ===");
-}
-</script>
-
-</body>
-</html>
+           rect.x+rect.width<boardRect.x+boardRect.width+5
