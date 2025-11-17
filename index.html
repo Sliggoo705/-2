@@ -1,7 +1,18 @@
 <!DOCTYPE html>
+<html>
 <head>
+    <meta charset="utf-8">
     <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+
     <script>
+        // OpenCV 読み込み完了時に呼ばれる公式コールバック
+        function onOpenCvReady() {
+            console.log("OpenCV loaded!");
+
+            const img = document.getElementById("puzzle");
+            debugOCR(img);
+        }
+
         function debugOCR(imgElement) {
             console.log("=== Debug start ===");
 
@@ -42,16 +53,16 @@
             console.log("Valid digit candidates:", validCount);
             console.log("=== Debug end ===");
         }
-
-        // OpenCV読み込み後に実行
-        document.addEventListener("opencvready", () => {
-            const img = document.getElementById("puzzle");
-            debugOCR(img);
-        });
     </script>
 </head>
 
 <body>
+    <p>OpenCV debug test</p>
     <img id="puzzle" src="your_image.png">
+
+    <script>
+        // 公式の OpenCV 初期化完了フック
+        cv['onRuntimeInitialized'] = onOpenCvReady;
+    </script>
 </body>
 </html>
