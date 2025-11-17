@@ -2,18 +2,18 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + 28x28 Normalize (Lightweight)</title>
+<title>Digit Extract + Split + 28x28 Normalize</title>
 <style>
-  body { font-family: sans-serif; }
-  #digits canvas {
-    margin: 4px;
-    border: 1px solid #ccc;
-  }
+body { font-family: sans-serif; }
+#digits canvas {
+  margin: 4px;
+  border: 1px solid #ccc;
+}
 </style>
 </head>
-
 <body>
-<h2>Digit Extract + 28x28 Normalize (Lightweight)</h2>
+
+<h2>Digit Extract + Split + 28x28 Normalize</h2>
 <input type="file" id="fileInput" accept="image/*"><br><br>
 <div id="log"></div>
 <div id="digits"></div>
@@ -21,99 +21,116 @@
 <script src="https://docs.opencv.org/4.x/opencv.js"></script>
 <script>
 document.addEventListener("DOMContentLoaded", async () => {
-    const fileInput = document.getElementById("fileInput");
-    const logDiv = document.getElementById("log");
-    const digitsDiv = document.getElementById("digits");
+  const fileInput = document.getElementById("fileInput");
+  const logDiv = document.getElementById("log");
+  const digitsDiv = document.getElementById("digits");
+  
+  function log(text){ logDiv.innerHTML += text + "<br>"; console.log(text); }
 
-    function log(text){ logDiv.innerHTML += text + "<br>"; console.log(text); }
+  await new Promise(resolve => {
+    cv['onRuntimeInitialized'] = () => { log("✔ OpenCV.js ready!"); resolve(); };
+  });
 
-    // OpenCVロード待機
-    await new Promise(resolve => {
-        cv['onRuntimeInitialized'] = () => { log("✔ OpenCV.js ready!"); resolve(); };
-    });
+  fileInput.addEventListener("change", (e)=>{
+    const file = e.target.files[0];
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => processImage(img);
+  });
 
-    fileInput.addEventListener("change", async (e) => {
-        const file = e.target.files[0];
-        const img = new Image();
-        img.src = URL.createObjectURL(file);
-        img.onload = () => processImage(img);
-    });
+  function processImage(img){
+    log("=== Start extraction ===");
 
-    function processImage(img) {
-        log("=== Start extraction ===");
+    // 軽量化: 最大幅600px
+    let scale = Math.min(600 / img.width, 1.0);
+    let w = Math.round(img.width * scale);
+    let h = Math.round(img.height * scale);
 
-        // 入力画像を軽量化
-        let scale = Math.min(600 / img.width, 1.0); // 最大幅600px
-        let w = Math.round(img.width * scale);
-        let h = Math.round(img.height * scale);
+    let canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    let ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, w, h);
 
-        let canvas = document.createElement("canvas");
-        canvas.width = w; canvas.height = h;
-        let ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, w, h);
+    let src = cv.imread(canvas);
+    let gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    let bin = new cv.Mat();
+    cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
 
-        let src = cv.imread(canvas);
+    // 輪郭検出
+    let contours = new cv.MatVector();
+    let hierarchy = new cv.Mat();
+    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-        // グレースケール + 二値化
-        let gray = new cv.Mat();
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        let bin = new cv.Mat();
-        cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-
-        // 輪郭検出
-        let contours = new cv.MatVector();
-        let hierarchy = new cv.Mat();
-        cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-        // 最大矩形を盤面と判断して除外
-        let maxArea = 0, boardRect = null;
-        for (let i = 0; i < contours.size(); i++) {
-            let r = cv.boundingRect(contours.get(i));
-            let area = r.width * r.height;
-            if (area > maxArea) { maxArea = area; boardRect = r; }
-        }
-        log("Board area excluded: " + JSON.stringify(boardRect));
-
-        // 数字候補抽出
-        let candidates = [];
-        for (let i = 0; i < contours.size(); i++) {
-            let r = cv.boundingRect(contours.get(i));
-            if (boardRect &&
-                r.x > boardRect.x - 5 &&
-                r.x + r.width < boardRect.x + boardRect.width + 5 &&
-                r.y > boardRect.y - 5 &&
-                r.y + r.height < boardRect.y + boardRect.height + 5) continue;
-            if (r.width < 8 || r.height < 8 || r.width > 100 || r.height > 60) continue;
-            candidates.push(r);
-        }
-
-        log("Total digit candidates: " + candidates.length);
-
-        // 28x28正規化して表示
-        digitsDiv.innerHTML = "";
-        candidates.forEach((r, idx) => {
-            let roi = bin.roi(new cv.Rect(r.x, r.y, r.width, r.height));
-            let size = Math.max(r.width, r.height);
-            let padded = cv.Mat.zeros(size, size, roi.type());
-            roi.copyTo(padded.rowRange(0, r.height).colRange(0, r.width));
-
-            let square = new cv.Mat();
-            cv.resize(padded, square, new cv.Size(28,28), 0,0, cv.INTER_AREA);
-
-            let outCanvas = document.createElement("canvas");
-            outCanvas.width = 28; outCanvas.height = 28;
-            cv.imshow(outCanvas, square);
-            digitsDiv.appendChild(outCanvas);
-
-            log(`Digit ${idx+1}: x=${r.x}, y=${r.y}, w=${r.width}, h=${r.height}`);
-
-            roi.delete(); padded.delete(); square.delete();
-        });
-
-        src.delete(); gray.delete(); bin.delete(); contours.delete(); hierarchy.delete();
-
-        log("=== End extraction ===");
+    // 最大矩形を盤面として除外
+    let maxArea = 0, boardRect = null;
+    for(let i=0;i<contours.size();i++){
+      let r = cv.boundingRect(contours.get(i));
+      let area = r.width * r.height;
+      if(area > maxArea){ maxArea = area; boardRect = r; }
     }
+    log("Board area excluded: " + JSON.stringify(boardRect));
+
+    // 候補抽出（サイズ＆盤面外）
+    let candidates = [];
+    for(let i=0;i<contours.size();i++){
+      let r = cv.boundingRect(contours.get(i));
+      if(r.width < 5 || r.height < 5) continue;       // 小さいノイズ除去
+      if(r.width > 100 || r.height > 60) continue;   // 大きすぎ除去
+      if(boardRect &&
+         r.x > boardRect.x && r.x + r.width < boardRect.x + boardRect.width &&
+         r.y > boardRect.y && r.y + r.height < boardRect.y + boardRect.height) continue;
+      candidates.push(r);
+    }
+
+    log("Candidates before split: " + candidates.length);
+
+    // 横長数字分割＆重複統合
+    let finalDigits = [];
+    candidates.forEach(r=>{
+      if(r.width > r.height*1.5){ // 横長判定
+        let n = Math.round(r.width / r.height);
+        for(let i=0;i<n;i++){
+          finalDigits.push({x: r.x + i*r.height, y: r.y, w: r.height, h: r.height});
+        }
+      } else {
+        finalDigits.push(r);
+      }
+    });
+
+    // 重複矩形統合（近接10px以内）
+    finalDigits.sort((a,b)=>a.y - b.y || a.x - b.x);
+    let merged = [];
+    finalDigits.forEach(r=>{
+      let overlap = merged.find(m=>Math.abs(m.x-r.x)<10 && Math.abs(m.y-r.y)<10);
+      if(!overlap) merged.push(r);
+    });
+
+    log("Total digits after split & merge: " + merged.length);
+
+    // 28x28に正規化して表示
+    digitsDiv.innerHTML = "";
+    merged.forEach((r, idx)=>{
+      let roi = bin.roi(new cv.Rect(r.x, r.y, r.w, r.h));
+      let size = Math.max(r.w, r.h);
+      let padded = cv.Mat.zeros(size, size, roi.type());
+      roi.copyTo(padded.rowRange(0,r.h).colRange(0,r.w));
+      let square = new cv.Mat();
+      cv.resize(padded, square, new cv.Size(28,28), 0,0, cv.INTER_AREA);
+
+      let outCanvas = document.createElement("canvas");
+      outCanvas.width = 28; outCanvas.height = 28;
+      cv.imshow(outCanvas, square);
+      digitsDiv.appendChild(outCanvas);
+
+      log(`Digit ${idx+1}: x=${r.x}, y=${r.y}, w=${r.w}, h=${r.h}`);
+
+      roi.delete(); padded.delete(); square.delete();
+    });
+
+    src.delete(); gray.delete(); bin.delete(); contours.delete(); hierarchy.delete();
+    log("=== End extraction ===");
+  }
 });
 </script>
 </body>
