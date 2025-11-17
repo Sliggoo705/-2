@@ -2,18 +2,15 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + Split + 28x28 Normalize</title>
+<title>Digit Extract + Filter + Split + Normalize</title>
 <style>
 body { font-family: sans-serif; }
-#digits canvas {
-  margin: 4px;
-  border: 1px solid #ccc;
-}
+#digits canvas { margin: 4px; border: 1px solid #ccc; }
 </style>
 </head>
 <body>
 
-<h2>Digit Extract + Split + 28x28 Normalize</h2>
+<h2>Digit Extract + Filter + Split + 28x28 Normalize</h2>
 <input type="file" id="fileInput" accept="image/*"><br><br>
 <div id="log"></div>
 <div id="digits"></div>
@@ -41,7 +38,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function processImage(img){
     log("=== Start extraction ===");
 
-    // 軽量化: 最大幅600px
+    // 最大幅600pxで軽量化
     let scale = Math.min(600 / img.width, 1.0);
     let w = Math.round(img.width * scale);
     let h = Math.round(img.height * scale);
@@ -71,12 +68,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     log("Board area excluded: " + JSON.stringify(boardRect));
 
-    // 候補抽出（サイズ＆盤面外）
+    // 候補抽出（サイズ＆盤面外＆上下端フィルタ）
     let candidates = [];
     for(let i=0;i<contours.size();i++){
       let r = cv.boundingRect(contours.get(i));
-      if(r.width < 5 || r.height < 5) continue;       // 小さいノイズ除去
-      if(r.width > 100 || r.height > 60) continue;   // 大きすぎ除去
+      if(r.width < 5 || r.height < 8) continue;       // 小さいノイズ除去
+      if(r.width > 50 || r.height > 40) continue;     // 大きすぎ除去
+      if(r.y < 10 || r.y + r.height > h - 10) continue; // 上下端のノイズ除去
       if(boardRect &&
          r.x > boardRect.x && r.x + r.width < boardRect.x + boardRect.width &&
          r.y > boardRect.y && r.y + r.height < boardRect.y + boardRect.height) continue;
@@ -98,11 +96,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
 
-    // 重複矩形統合（近接10px以内）
+    // 重複矩形統合（近接5px以内）
     finalDigits.sort((a,b)=>a.y - b.y || a.x - b.x);
     let merged = [];
     finalDigits.forEach(r=>{
-      let overlap = merged.find(m=>Math.abs(m.x-r.x)<10 && Math.abs(m.y-r.y)<10);
+      let overlap = merged.find(m=>Math.abs(m.x-r.x)<5 && Math.abs(m.y-r.y)<5);
       if(!overlap) merged.push(r);
     });
 
