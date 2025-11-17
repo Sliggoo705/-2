@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract High Precision</title>
+<title>Digit Extract + 28x28 Normalize</title>
 <style>
   body { font-family: sans-serif; }
   #digits canvas {
@@ -13,7 +13,7 @@
 </head>
 
 <body>
-<h2>Digit Extract High Precision (A版)</h2>
+<h2>Digit Extract + 28x28 Normalize</h2>
 
 <input type="file" id="fileInput" accept="image/*"><br><br>
 
@@ -24,14 +24,11 @@
 <script async src="https://docs.opencv.org/4.x/opencv.js" onload="cvLoaded()"></script>
 
 <script>
-// ログ表示用
 function log(text) {
     document.getElementById("log").innerHTML += text + "<br>";
 }
 
-// OpenCVロード完了フラグ
 let cvReady = false;
-
 function cvLoaded() {
     cv['onRuntimeInitialized'] = () => {
         cvReady = true;
@@ -40,12 +37,11 @@ function cvLoaded() {
 }
 
 // 画像アップロードイベント
-document.getElementById("fileInput").addEventListener("change", async (e) => {
+document.getElementById("fileInput").addEventListener("change", (e) => {
     if (!cvReady) {
         alert("OpenCV is not ready yet. Wait 1–2 seconds.");
         return;
     }
-
     const file = e.target.files[0];
     const img = new Image();
     img.src = URL.createObjectURL(file);
@@ -53,7 +49,7 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
 });
 
 // ----------------------------
-// 改良版：数字抽出関数
+// 重複マージ＋28x28正規化
 // ----------------------------
 function extractDigits(img) {
     log("=== Start extraction ===");
@@ -61,15 +57,14 @@ function extractDigits(img) {
     let src = cv.imread(img);
     log("Read image: " + src.cols + " x " + src.rows);
 
-    // グレースケール
+    // グレースケール & 二値化
     let gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // 二値化（OTSU）
     let bin = new cv.Mat();
     cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
 
-    // ノイズ除去（小さい点を消す）
+    // ノイズ除去
     let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
     cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kernel);
 
@@ -78,28 +73,20 @@ function extractDigits(img) {
     let hierarchy = new cv.Mat();
     cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // --- 盤面領域を推定して除外 ---
+    // 盤面の除外
     let boardRect = null;
     let maxArea = 0;
     for (let i = 0; i < contours.size(); i++) {
-        let cnt = contours.get(i);
-        let rect = cv.boundingRect(cnt);
+        let rect = cv.boundingRect(contours.get(i));
         let area = rect.width * rect.height;
-        if (area > maxArea) {
-            maxArea = area;
-            boardRect = rect;
-        }
+        if (area > maxArea) { maxArea = area; boardRect = rect; }
     }
     log("Board area (excluded): " + JSON.stringify(boardRect));
 
-    // 数字抽出
-    const container = document.getElementById("digits");
-    container.innerHTML = "";
-    let digitCount = 0;
-
+    // 数字候補リスト
+    let candidates = [];
     for (let i = 0; i < contours.size(); i++) {
-        let cnt = contours.get(i);
-        let rect = cv.boundingRect(cnt);
+        let rect = cv.boundingRect(contours.get(i));
         let x = rect.x, y = rect.y, w = rect.width, h = rect.height;
 
         // 盤面領域は除外
@@ -107,32 +94,61 @@ function extractDigits(img) {
             x > boardRect.x - 5 &&
             x + w < boardRect.x + boardRect.width + 5 &&
             y > boardRect.y - 5 &&
-            y + h < boardRect.y + boardRect.height + 5) 
-        {
-            continue;
-        }
+            y + h < boardRect.y + boardRect.height + 5) continue;
 
-        // サイズフィルタ（数字サイズのみ）
-        if (w > 40 && h > 40) continue; // 大きすぎる → 盤面の一部
-        if (w < 8 || h < 8) continue;   // 小さすぎる → ノイズ
-
-        log(`✔ Digit ${digitCount+1}: x=${x}, y=${y}, w=${w}, h=${h}`);
-
-        // 切り抜き & 表示
-        let roi = bin.roi(new cv.Rect(x, y, w, h));
-        let canvas = document.createElement("canvas");
-        cv.imshow(canvas, roi);
-        container.appendChild(canvas);
-
-        roi.delete();
-        digitCount++;
+        if (w > 40 || h > 40 || w < 8 || h < 8) continue; // サイズフィルタ
+        candidates.push(rect);
     }
 
-    log("Total digits extracted: " + digitCount);
+    // 近接重複マージ
+    let merged = [];
+    const threshold = 5; // px
+    candidates.forEach(r => {
+        let mergedFlag = false;
+        for (let m of merged) {
+            if (Math.abs(r.x - m.x) <= threshold &&
+                Math.abs(r.y - m.y) <= threshold &&
+                Math.abs(r.width - m.width) <= threshold &&
+                Math.abs(r.height - m.height) <= threshold) {
+                // マージ
+                m.x = Math.min(m.x, r.x);
+                m.y = Math.min(m.y, r.y);
+                m.width = Math.max(m.x + m.width, r.x + r.width) - m.x;
+                m.height = Math.max(m.y + m.height, r.y + r.height) - m.y;
+                mergedFlag = true;
+                break;
+            }
+        }
+        if (!mergedFlag) merged.push(r);
+    });
 
-    // 後処理
-    src.delete(); gray.delete(); bin.delete();
-    contours.delete(); hierarchy.delete(); kernel.delete();
+    log("Total merged digits: " + merged.length);
+
+    const container = document.getElementById("digits");
+    container.innerHTML = "";
+
+    // 28x28正規化
+    merged.forEach((rect, idx) => {
+        let roi = bin.roi(new cv.Rect(rect.x, rect.y, rect.width, rect.height));
+        let square = new cv.Mat();
+        let size = Math.max(rect.width, rect.height);
+        let padded = cv.Mat.zeros(size, size, roi.type());
+        roi.copyTo(padded.rowRange(0, rect.height).colRange(0, rect.width));
+
+        cv.resize(padded, square, new cv.Size(28, 28), 0, 0, cv.INTER_AREA);
+
+        let canvas = document.createElement("canvas");
+        canvas.width = 28; canvas.height = 28;
+        cv.imshow(canvas, square);
+        container.appendChild(canvas);
+
+        log(`Digit ${idx+1}: x=${rect.x}, y=${rect.y}, w=${rect.width}, h=${rect.height}`);
+
+        roi.delete(); padded.delete(); square.delete();
+    });
+
+    src.delete(); gray.delete(); bin.delete(); kernel.delete();
+    contours.delete(); hierarchy.delete();
 
     log("=== End extraction ===");
 }
