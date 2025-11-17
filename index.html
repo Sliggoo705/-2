@@ -1,143 +1,25 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Digit Extract + OCR</title>
-<script src="https://docs.opencv.org/4.x/opencv.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+<title>Picross OCR Test</title>
+<script src="https://docs.opencv.org/4.7.0/opencv.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
 <style>
-body { font-family: sans-serif; }
-#digits canvas { margin: 4px; border: 1px solid #ccc; }
-#digits div { display: inline-block; text-align: center; margin: 2px; }
+  #canvasOutput { border:1px solid blue; }
 </style>
 </head>
 <body>
-
-<h2>Digit Extract + 28x28 Normalize + MNIST OCR</h2>
-<input type="file" id="fileInput" accept="image/*"><br><br>
-<div id="log"></div>
-<div id="digits"></div>
+<h3>画像を選択してください</h3>
+<input type="file" id="fileInput" accept="image/*">
+<canvas id="canvasOutput"></canvas>
+<pre id="log"></pre>
 
 <script>
-let model = null;
+const log = (msg) => { document.getElementById('log').textContent += msg + '\n'; };
 
-async function loadModel(){
-  model = await tf.loadLayersModel('https://storage.googleapis.com/tfjs-models/tfjs/mnist/model.json');
-  document.getElementById("log").innerHTML += "✔ MNIST model loaded!<br>";
-}
-
-loadModel();
-
-document.addEventListener("DOMContentLoaded", async () => {
-  const fileInput = document.getElementById("fileInput");
-  const logDiv = document.getElementById("log");
-  const digitsDiv = document.getElementById("digits");
-  
-  function log(text){ logDiv.innerHTML += text + "<br>"; console.log(text); }
-
-  await new Promise(resolve => {
-    cv['onRuntimeInitialized'] = () => { log("✔ OpenCV.js ready!"); resolve(); };
-  });
-
-  fileInput.addEventListener("change", (e)=>{
-    const file = e.target.files[0];
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    img.onload = () => processImage(img);
-  });
-
-  async function processImage(img){
-    log("=== Start extraction ===");
-    let scale = Math.min(600 / img.width, 1.0);
-    let w = Math.round(img.width * scale);
-    let h = Math.round(img.height * scale);
-    let canvas = document.createElement("canvas");
-    canvas.width = w; canvas.height = h;
-    canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-
-    let src = cv.imread(canvas);
-    let gray = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    let bin = new cv.Mat();
-    cv.threshold(gray, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-
-    let contours = new cv.MatVector();
-    let hierarchy = new cv.Mat();
-    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    let maxArea=0, boardRect=null;
-    for(let i=0;i<contours.size();i++){
-      let r = cv.boundingRect(contours.get(i));
-      let area = r.width*r.height;
-      if(area>maxArea){ maxArea=area; boardRect=r; }
-    }
-    log("Board area excluded: " + JSON.stringify(boardRect));
-
-    let candidates = [];
-    for(let i=0;i<contours.size();i++){
-      let r = cv.boundingRect(contours.get(i));
-      if(r.width<5 || r.height<8) continue;
-      if(r.width>50 || r.height>40) continue;
-      if(r.y<10 || r.y+r.height>h-10) continue;
-      if(boardRect &&
-         r.x>boardRect.x && r.x+r.width<boardRect.x+boardRect.width &&
-         r.y>boardRect.y && r.y+r.height<boardRect.y+boardRect.height) continue;
-      candidates.push(r);
-    }
-
-    log("Candidates before split: "+candidates.length);
-
-    let finalDigits=[];
-    candidates.forEach(r=>{
-      if(r.width>r.height*1.5){
-        let n=Math.round(r.width/r.height);
-        for(let i=0;i<n;i++){
-          finalDigits.push({x:r.x+i*r.height, y:r.y, w:r.height, h:r.height});
-        }
-      }else finalDigits.push(r);
-    });
-
-    finalDigits.sort((a,b)=>a.y-b.y||a.x-b.x);
-    let merged=[];
-    finalDigits.forEach(r=>{
-      let overlap = merged.find(m=>Math.abs(m.x-r.x)<5 && Math.abs(m.y-r.y)<5);
-      if(!overlap) merged.push(r);
-    });
-
-    log("Total digits after split & merge: "+merged.length);
-
-    digitsDiv.innerHTML="";
-    for(let idx=0; idx<merged.length; idx++){
-      let r = merged[idx];
-      let roi = bin.roi(new cv.Rect(r.x, r.y, r.w, r.h));
-      let size = Math.max(r.w,r.h);
-      let padded = cv.Mat.zeros(size,size,roi.type());
-      roi.copyTo(padded.rowRange(0,r.h).colRange(0,r.w));
-      let square = new cv.Mat();
-      cv.resize(padded, square, new cv.Size(28,28),0,0,cv.INTER_AREA);
-
-      // OCR
-      let tensor = tf.tensor(Array.from(square.data), [28,28,1], 'float32').div(255).expandDims(0);
-      let pred = model.predict(tensor);
-      let digit = pred.argMax(1).dataSync()[0];
-
-      let container = document.createElement("div");
-      let outCanvas = document.createElement("canvas");
-      outCanvas.width=28; outCanvas.height=28;
-      cv.imshow(outCanvas, square);
-      container.appendChild(outCanvas);
-      let label = document.createElement("div");
-      label.innerText=digit;
-      container.appendChild(label);
-      digitsDiv.appendChild(container);
-
-      roi.delete(); padded.delete(); square.delete(); tensor.dispose(); pred.dispose();
-    }
-
-    src.delete(); gray.delete(); bin.delete(); contours.delete(); hierarchy.delete();
-    log("=== End extraction ===");
-  }
-});
-</script>
-</body>
-</html>
+// MNISTモデル読み込み用
+let model;
+async function loadModel() {
+    log("Loading MNIST model...");
+    model = await tf.loadLayersModel('https://
