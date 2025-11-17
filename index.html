@@ -1,93 +1,355 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-  <meta charset="utf-8">
-  <title>Picross OCR Test</title>
-  <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady()"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
-  <style>
-    body { font-family: sans-serif; margin: 20px; }
-    canvas { border:1px solid #ccc; margin-top: 10px; }
-  </style>
+<meta charset="utf-8">
+<title>Picross OCR - Complete One File</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif; padding:16px; }
+  h1 { font-size:18px; margin-bottom:8px; }
+  #controls { margin-bottom:12px; }
+  #canvasPreview { border:1px solid #ccc; max-width:100%; display:block; margin-bottom:8px; }
+  #log { white-space:pre-wrap; background:#f6f6f6; padding:8px; border-radius:6px; max-height:220px; overflow:auto; font-size:13px;}
+  .thumb { display:inline-block; margin:6px; text-align:center; }
+  .thumb canvas { border:1px solid #ddd; display:block; margin-bottom:4px; width:56px; height:56px; image-rendering:pixelated; }
+  .section { margin-top:12px; }
+  button { margin-left:8px; }
+</style>
 </head>
 <body>
-  <h2>Picross OCR Test</h2>
-  <input type="file" id="imageInput">
-  <canvas id="canvasOutput"></canvas>
-  <script>
-    let cvReady = false;
-    let model;
+<h1>Picross OCR — 完成版（OpenCV + Tesseract）</h1>
 
-    function onOpenCvReady() {
-      console.log("✔ OpenCV.js ready!");
-      cvReady = true;
+<div id="controls">
+  <input type="file" id="fileInput" accept="image/*">
+  <button id="runBtn">抽出・OCR 実行</button>
+  <span id="status" style="margin-left:10px;color:#555"></span>
+</div>
+
+<img id="canvasPreview" alt="preview">
+
+<div class="section">
+  <strong>ログ</strong>
+  <div id="log">※ ログはここに出ます。</div>
+</div>
+
+<div class="section">
+  <strong>上側ヒント（横）</strong>
+  <div id="topHints"></div>
+</div>
+
+<div class="section">
+  <strong>左側ヒント（縦）</strong>
+  <div id="leftHints"></div>
+</div>
+
+<!-- OpenCV.js (non-async to make onRuntimeInitialized reliable) -->
+<script src="https://docs.opencv.org/4.8.0/opencv.js"></script>
+<!-- Tesseract.js -->
+<script src="https://unpkg.com/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+
+<script>
+/*
+  完全版：OpenCVで盤面検出(最大矩形)→ヒント領域切り出し(上/左)→前処理→Tesseractで数字認識
+  使い方：ファイルを選択 -> 「抽出・OCR 実行」ボタン
+*/
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const previewImg = document.getElementById('canvasPreview');
+const fileInput = document.getElementById('fileInput');
+const runBtn = document.getElementById('runBtn');
+const topHintsEl = document.getElementById('topHints');
+const leftHintsEl = document.getElementById('leftHints');
+
+let loadedImage = null;
+let cvReady = false;
+
+// helper log
+function log(msg){
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent += `[${t}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// OpenCV ready
+cv['onRuntimeInitialized'] = () => {
+  cvReady = true;
+  log("✔ OpenCV.js ready");
+};
+
+// show preview when a file is selected
+fileInput.addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if(!f) return;
+  const url = URL.createObjectURL(f);
+  previewImg.onload = () => {
+    // scale down if very large for interactive speed
+    const maxW = 1000;
+    if(previewImg.naturalWidth > maxW){
+      const scale = maxW / previewImg.naturalWidth;
+      previewImg.width = Math.round(previewImg.naturalWidth * scale);
+      previewImg.height = Math.round(previewImg.naturalHeight * scale);
+    } else {
+      previewImg.width = previewImg.naturalWidth;
+      previewImg.height = previewImg.naturalHeight;
     }
+    loadedImage = { url, file: f };
+    log(`Preview loaded: ${previewImg.naturalWidth}x${previewImg.naturalHeight} (display ${previewImg.width}x${previewImg.height})`);
+  };
+  previewImg.src = url;
+});
 
-    async function loadModel() {
-      if(model) return model;
-      try {
-        const MODEL_URL = 'https://storage.googleapis.com/learnjs-data/model-builder/mnist/model.json';
-        model = await tf.loadLayersModel(MODEL_URL);
-        console.log("✔ MNIST model loaded");
-      } catch(err) {
-        console.error("Failed to load MNIST model:", err);
+// main run button
+runBtn.addEventListener('click', async () => {
+  if(!loadedImage){ alert("画像を選んでください"); return; }
+  if(!cvReady){ alert("OpenCVがまだ読み込まれていません。少し待ってから再実行してください。"); return; }
+
+  // initialize tesseract worker
+  statusEl.textContent = '準備中...';
+  runBtn.disabled = true;
+  topHintsEl.innerHTML = ''; leftHintsEl.innerHTML = '';
+  log('--- Start pipeline ---');
+
+  const worker = Tesseract.createWorker({
+    logger: m => {
+      // minimal progress logs
+      if(m.status && m.progress) statusEl.textContent = `${m.status} ${(m.progress*100).toFixed(0)}%`;
+    }
+  });
+  await worker.load();
+  await worker.loadLanguage('eng');
+  await worker.initialize('eng');
+  await worker.setParameters({
+    tessedit_char_whitelist: '0123456789',
+    tessedit_pageseg_mode: Tesseract.PSM.SINGLE_CHAR // we'll OCR one character/cell canvases or small images
+  });
+  log('✔ Tesseract worker ready');
+
+  try {
+    // create a working canvas sized to preview
+    const c = document.createElement('canvas');
+    c.width = previewImg.width;
+    c.height = previewImg.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(previewImg, 0, 0, c.width, c.height);
+
+    // read into OpenCV Mat
+    let src = cv.imread(c);
+    let orig = src.clone();
+
+    // convert to gray and adaptive threshold to be robust to lighting
+    cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY);
+    let blur = new cv.Mat();
+    cv.GaussianBlur(src, blur, new cv.Size(3,3), 0);
+    let bin = new cv.Mat();
+    cv.adaptiveThreshold(blur, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 25, 10);
+
+    // morphological close to join digits or grid lines if necessary
+    let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3,3));
+    cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kernel);
+
+    // find contours to detect big board area
+    let contours = new cv.MatVector();
+    let hierarchy = new cv.Mat();
+    cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    log(`Contours found: ${contours.size()}`);
+
+    // choose largest contour by area as board (heuristic)
+    let boardRect = null;
+    let maxArea = 0;
+    for(let i=0;i<contours.size();i++){
+      let r = cv.boundingRect(contours.get(i));
+      let area = r.width * r.height;
+      if(area > maxArea){
+        maxArea = area;
+        boardRect = r;
       }
-      return model;
+    }
+    if(!boardRect){
+      log('Board (盤面) が見つかりませんでした。簡易処理に切り替えします。');
+      // fallback: use center square
+      boardRect = { x: Math.round(c.width*0.2), y: Math.round(c.height*0.2),
+                    width: Math.round(c.width*0.6), height: Math.round(c.height*0.6) };
+    }
+    log(`Board area (excluded): ${JSON.stringify(boardRect)}`);
+
+    // calculate hint regions: top (above board) and left (left of board)
+    // add small padding
+    const pad = 6;
+    const topRegion = { x: 0, y: 0, width: c.width, height: Math.max(1, boardRect.y - pad) };
+    const leftRegion = { x: 0, y: boardRect.y - pad, width: Math.max(1, boardRect.x - pad), height: boardRect.height + pad*2 };
+
+    log(`Top region: ${JSON.stringify(topRegion)}`);
+    log(`Left region: ${JSON.stringify(leftRegion)}`);
+
+    // helper to extract candidate digit boxes from a region mat
+    function extractCandidatesFromRegion(regionMat, regionOffsetX=0, regionOffsetY=0){
+      let mcontours = new cv.MatVector();
+      let mhierarchy = new cv.Mat();
+      cv.findContours(regionMat, mcontours, mhierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      let boxes = [];
+      for(let i=0;i<mcontours.size();i++){
+        let r = cv.boundingRect(mcontours.get(i));
+        // filter by size (empirically tuned)
+        if(r.width < 6 || r.height < 6) continue;
+        if(r.width > regionMat.cols*0.9 || r.height > regionMat.rows*0.9) continue;
+        boxes.push({ x: r.x + regionOffsetX, y: r.y + regionOffsetY, w: r.width, h: r.height });
+      }
+      mcontours.delete(); mhierarchy.delete();
+      return boxes;
     }
 
-    document.getElementById('imageInput').addEventListener('change', async (e) => {
-      if(!cvReady) { alert("OpenCV.js is not ready yet"); return; }
-      const file = e.target.files[0];
-      if(!file) return;
+    // crop top & left mats
+    const topMat = bin.roi(new cv.Rect(topRegion.x, topRegion.y, topRegion.width, topRegion.height));
+    const leftMat = bin.roi(new cv.Rect(leftRegion.x, leftRegion.y, leftRegion.width, leftRegion.height));
 
-      const img = new Image();
-      img.onload = async function() {
-        const canvas = document.getElementById('canvasOutput');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
+    // extract raw boxes
+    let topBoxes = extractCandidatesFromRegion(topMat, topRegion.x, topRegion.y);
+    let leftBoxes = extractCandidatesFromRegion(leftMat, leftRegion.x, leftRegion.y);
 
-        // OpenCV で処理
-        let src = cv.imread(canvas);
-        let gray = new cv.Mat();
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-        cv.threshold(gray, gray, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+    log(`Raw top boxes: ${topBoxes.length}, left boxes: ${leftBoxes.length}`);
 
-        let contours = new cv.MatVector();
-        let hierarchy = new cv.Mat();
-        cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    // postprocess boxes: sort and merge near duplicates, split wide boxes
+    function normalizeAndSplit(boxes, isHorizontal=true){
+      // sort left-to-right or top-to-bottom
+      boxes.sort((a,b)=> isHorizontal ? a.x - b.x : a.y - b.y);
 
-        console.log("Contours found:", contours.size());
+      // merge near duplicates (distance threshold)
+      let merged = [];
+      const distThresh = 8;
+      boxes.forEach(b=>{
+        let found = merged.find(m=>{
+          return Math.abs(m.x - b.x) <= distThresh && Math.abs(m.y - b.y) <= distThresh;
+        });
+        if(found){
+          // expand found
+          const x1 = Math.min(found.x, b.x);
+          const y1 = Math.min(found.y, b.y);
+          const x2 = Math.max(found.x + found.w, b.x + b.w);
+          const y2 = Math.max(found.y + found.h, b.y + b.h);
+          found.x = x1; found.y = y1; found.w = x2 - x1; found.h = y2 - y1;
+        } else merged.push(Object.assign({}, b));
+      });
 
-        if(!model) await loadModel();
+      // split horizontally long boxes (they may contain multiple digits)
+      let final = [];
+      merged.forEach(m=>{
+        if(m.w > m.h * 1.6){
+          let n = Math.round(m.w / m.h);
+          n = Math.max(2, n);
+          const wunit = Math.floor(m.w / n);
+          for(let k=0;k<n;k++){
+            final.push({ x: m.x + k*wunit, y: m.y, w: wunit, h: m.h });
+          }
+        } else final.push(m);
+      });
 
-        for(let i=0; i<contours.size(); i++){
-          let rect = cv.boundingRect(contours.get(i));
-          if(rect.width < 5 || rect.height < 5 || rect.width > 50 || rect.height > 50) continue;
+      // final small filter & sort again
+      final = final.filter(f=> f.w >= 6 && f.h >= 6);
+      final.sort((a,b)=> isHorizontal ? a.x - b.x : a.y - b.y);
+      return final;
+    }
 
-          let roi = gray.roi(rect);
-          let dst = new cv.Mat();
-          cv.resize(roi, dst, new cv.Size(28,28), 0, 0, cv.INTER_AREA);
+    let topFinal = normalizeAndSplit(topBoxes, true);
+    let leftFinal = normalizeAndSplit(leftBoxes, false);
 
-          let tensor = tf.tensor(Array.from(dst.data), [28,28,1], 'float32').div(255.0).expandDims(0);
-          let pred = model.predict(tensor);
-          let digit = pred.argMax(1).dataSync()[0];
-          console.log(`Digit detected at x=${rect.x}, y=${rect.y}: ${digit}`);
+    log(`Postprocessed top boxes: ${topFinal.length}, left boxes: ${leftFinal.length}`);
 
-          roi.delete();
-          dst.delete();
-          tensor.dispose();
-          pred.dispose();
+    // limit counts (safety)
+    topFinal = topFinal.slice(0, 200);
+    leftFinal = leftFinal.slice(0, 200);
+
+    // helper to create 28x28 canvas from bin mat region
+    function make28CanvasFromRect(rect){
+      const tmpCanvas = document.createElement('canvas');
+      const size = 28;
+      tmpCanvas.width = size; tmpCanvas.height = size;
+      const tmpCtx = tmpCanvas.getContext('2d');
+
+      // extract ROI from original grayscale image (use orig for cleaner)
+      const roiMat = bin.roi(new cv.Rect(rect.x, rect.y, rect.w, rect.h));
+      // pad to square
+      const s = Math.max(rect.w, rect.h);
+      let padded = cv.Mat.zeros(s, s, roiMat.type());
+      roiMat.copyTo(padded.rowRange(0, rect.h).colRange(0, rect.w));
+      let dst = new cv.Mat();
+      cv.resize(padded, dst, new cv.Size(size, size), 0,0, cv.INTER_AREA);
+
+      // convert dst to canvas
+      const imgData = new ImageData(size, size);
+      for(let r=0;r<size;r++){
+        for(let c=0;c<size;c++){
+          const val = dst.ucharPtr(r,c)[0];
+          const idx = (r*size + c)*4;
+          imgData.data[idx] = imgData.data[idx+1] = imgData.data[idx+2] = 255 - val; // invert back to black-on-white for tesseract
+          imgData.data[idx+3] = 255;
         }
+      }
+      tmpCtx.putImageData(imgData, 0, 0);
 
-        src.delete();
-        gray.delete();
-        contours.delete();
-        hierarchy.delete();
-      };
-      img.src = URL.createObjectURL(file);
+      roiMat.delete(); padded.delete(); dst.delete();
+      return tmpCanvas;
+    }
+
+    // OCR for an array of rects; returns array of {rect, text}
+    async function ocrRects(rects){
+      const results = [];
+      for(let i=0;i<rects.length;i++){
+        const r = rects[i];
+        try {
+          const c28 = make28CanvasFromRect(r);
+          // Tesseract: we recognize each small canvas - single char
+          const { data: { text } } = await worker.recognize(c28);
+          const cleaned = (text || '').replace(/[^0-9]/g,'').trim();
+          results.push({ rect: r, text: cleaned.length ? cleaned : '?' , canvas: c28 });
+        } catch(err){
+          results.push({ rect: r, text: '?', canvas: null });
+        }
+      }
+      return results;
+    }
+
+    statusEl.textContent = 'OCR 実行中...';
+    log('Performing OCR on top hints...');
+    const topResults = await ocrRects(topFinal);
+    log('Performing OCR on left hints...');
+    const leftResults = await ocrRects(leftFinal);
+    statusEl.textContent = '完了';
+
+    // render results thumbnails + labels
+    topHintsEl.innerHTML = ''; leftHintsEl.innerHTML = '';
+    topResults.forEach((r,i)=>{
+      const div = document.createElement('div'); div.className='thumb';
+      if(r.canvas) div.appendChild(r.canvas);
+      const label = document.createElement('div');
+      label.textContent = r.text;
+      div.appendChild(label);
+      topHintsEl.appendChild(div);
+      log(`Top[${i}] @(${r.rect.x},${r.rect.y}) → ${r.text}`);
     });
-  </script>
+    leftResults.forEach((r,i)=>{
+      const div = document.createElement('div'); div.className='thumb';
+      if(r.canvas) div.appendChild(r.canvas);
+      const label = document.createElement('div');
+      label.textContent = r.text;
+      div.appendChild(label);
+      leftHintsEl.appendChild(div);
+      log(`Left[${i}] @(${r.rect.x},${r.rect.y}) → ${r.text}`);
+    });
+
+    // cleanup mats
+    src.delete(); orig.delete(); blur.delete(); bin.delete(); kernel.delete();
+    contours.delete(); hierarchy.delete(); topMat.delete(); leftMat.delete();
+
+  } catch(err){
+    console.error(err);
+    log('エラー：' + (err.message || err));
+    statusEl.textContent = 'エラー';
+  } finally {
+    await worker.terminate();
+    runBtn.disabled = false;
+    log('--- End pipeline ---');
+  }
+});
+</script>
 </body>
 </html>
