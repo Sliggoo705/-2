@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Picross CNN OCR & Solver</title>
+<title>Picross CNN OCR 完全版</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
 <style>
 body{font-family:Arial,sans-serif;margin:16px;}
@@ -11,7 +11,7 @@ pre{background:#f8f8f8;padding:10px;overflow-x:auto;}
 </style>
 </head>
 <body>
-<h2>Picross CNN OCR & Solver</h2>
+<h2>Picross CNN OCR 完全版</h2>
 <input type="file" id="imgInput" accept="image/*">
 <canvas id="preview"></canvas>
 <canvas id="solution"></canvas>
@@ -24,7 +24,7 @@ const solutionCanvas=document.getElementById('solution');
 const jsonOut=document.getElementById('jsonOut');
 let model=null;
 
-// --- MNIST互換CNNモデルを読み込み ---
+// --- MNIST互換CNNモデルロード ---
 async function loadModel(){
     model = await tf.loadLayersModel('https://.../mnist_cnn/model.json'); // 適切なモデルURLを指定
 }
@@ -42,48 +42,59 @@ function preprocessImage(img){
     const im=ctx.getImageData(0,0,c.width,c.height);
     const d=im.data;
     for(let i=0;i<d.length;i+=4){
-        const v=(d[i]+d[i+1]+d[i+2])/3 > 160 ? 255 : 0;
+        const v=(d[i]+d[i+1]+d[i+2])/3>160?255:0;
         d[i]=d[i+1]=d[i+2]=v;
     }
     ctx.putImageData(im,0,0);
-
-    // グリッド線除去（簡易）
-    const w=c.width, h=c.height;
-    const data=ctx.getImageData(0,0,w,h);
-    const pixels=data.data;
+    // グリッド線除去（横・縦）
+    const w=c.width,h=c.height; const data=ctx.getImageData(0,0,w,h); const pixels=data.data;
     const threshold=0.95;
-    // 横線
     for(let y=0;y<h;y++){
-        let black=0;
-        for(let x=0;x<w;x++){ if(pixels[(y*w+x)*4]<128) black++; }
+        let black=0; for(let x=0;x<w;x++){ if(pixels[(y*w+x)*4]<128) black++; }
         if(black/w>threshold){ for(let x=0;x<w;x++){ const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255; } }
     }
-    // 縦線
     for(let x=0;x<w;x++){
-        let black=0;
-        for(let y=0;y<h;y++){ if(pixels[(y*w+x)*4]<128) black++; }
+        let black=0; for(let y=0;y<h;y++){ if(pixels[(y*w+x)*4]<128) black++; }
         if(black/h>threshold){ for(let y=0;y<h;y++){ const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255; } }
     }
     ctx.putImageData(data,0,0);
     return c;
 }
 
-// --- 数字クラスタをCNNで分類 ---
+// --- CNNで数字分類 ---
 async function recognizeDigit(cluster){
     const c28=makeCanvas(28,28);
     c28.getContext('2d').drawImage(cluster,0,0,28,28);
-    const imgData = c28.getContext('2d').getImageData(0,0,28,28);
+    const imgData=c28.getContext('2d').getImageData(0,0,28,28);
     let arr=[];
-    for(let i=0;i<imgData.data.length;i+=4){
-        arr.push(imgData.data[i]<128 ? 1 : 0);
-    }
+    for(let i=0;i<imgData.data.length;i+=4){ arr.push(imgData.data[i]<128?1:0); }
     const tensor=tf.tensor(arr,[1,28,28,1]);
     const pred=model.predict(tensor);
     const digit=pred.argMax(-1).dataSync()[0];
     return digit;
 }
 
-// --- Solver（確定マスのみ） ---
+// --- 投影でクラスタ抽出（行ヒント例） ---
+function extractClusters(canvas, isRow=true){
+    const ctx=canvas.getContext('2d');
+    const w=canvas.width,h=canvas.height;
+    const data=ctx.getImageData(0,0,w,h).data;
+    const proj=[];
+    if(isRow){
+        for(let y=0;y<h;y++){ let sum=0; for(let x=0;x<w;x++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
+    }else{
+        for(let x=0;x<w;x++){ let sum=0; for(let y=0;y<h;y++){ if(data[(y*w+x)*4]<128) sum++; } proj.push(sum); }
+    }
+    const clusters=[]; let inC=false, start=0;
+    for(let i=0;i<proj.length;i++){
+        if(!inC && proj[i]>0){ inC=true; start=i; }
+        else if(inC && proj[i]===0){ inC=false; clusters.push([start,i]); }
+    }
+    if(inC) clusters.push([start,proj.length]);
+    return clusters;
+}
+
+// --- Solver（簡易） ---
 function solvePicross(rows,cols){
     const H=rows.length,W=cols.length;
     const grid=Array.from({length:H},()=>Array(W).fill(null));
@@ -125,8 +136,21 @@ imgInput.addEventListener('change',async ev=>{
         const H=15,W=15; // 仮設定
         const rows=[],cols=[];
 
-        // --- TODO: 縦横投影で数字クラスタ抽出 ---
-        // 各クラスタを recognizeDigit() に渡して行・列配列を作る
+        // 行ヒント領域の自動切り出し
+        const rowArea=cropCanvas(bin,0,0,Math.floor(bin.width*0.2),bin.height);
+        const rowClusters=extractClusters(rowArea,true);
+        for(const [start,end] of rowClusters){
+            const clusterImg=cropCanvas(rowArea,0,start,rowArea.width,end-start);
+            rows.push([await recognizeDigit(clusterImg)]); // 複数数字分割は必要に応じて追加
+        }
+
+        // 列ヒント領域の自動切り出し
+        const colArea=cropCanvas(bin,0,0,bin.width,Math.floor(bin.height*0.2));
+        const colClusters=extractClusters(colArea,false);
+        for(const [start,end] of colClusters){
+            const clusterImg=cropCanvas(colArea,start,0,end-start,colArea.height);
+            cols.push([await recognizeDigit(clusterImg)]); // 複数数字分割は必要に応じて追加
+        }
 
         jsonOut.textContent=JSON.stringify({rows,cols});
         const solution=solvePicross(rows,cols);
