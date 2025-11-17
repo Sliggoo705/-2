@@ -1,121 +1,82 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8" />
-<title>Digit OCR Test</title>
-<style>
-  body { font-family: sans-serif; padding: 20px; }
-  #preview { max-width: 300px; margin-top: 10px; }
-  #log { white-space: pre; background:#eee; padding:10px; margin-top:15px; }
-</style>
+  <meta charset="utf-8">
+  <title>Picross OCR Demo</title>
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js" type="text/javascript"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
+  <style>
+    body { font-family: sans-serif; margin: 20px; }
+    canvas { border:1px solid #ccc; margin-top: 10px; }
+  </style>
 </head>
 <body>
+  <h2>Picross OCR Demo</h2>
+  <input type="file" id="imageInput">
+  <canvas id="canvasOutput"></canvas>
+  <script>
+    let cvReady = false;
+    let model;
 
-<h2>OpenCV + TFJS Digit OCR</h2>
+    // OpenCV.js が読み込まれたら呼ばれる
+    function onOpenCvReady() {
+      console.log('✔ OpenCV.js ready!');
+      cvReady = true;
+    }
 
-<input type="file" id="fileInput"><br>
-<img id="preview"><br>
+    // MNIST モデルロード
+    async function loadModel() {
+      const MODEL_URL = 'https://storage.googleapis.com/tfjs-models/tfjs/mnist_transfer_cnn_v1/model.json';
+      model = await tf.loadLayersModel(MODEL_URL);
+      console.log('✔ MNIST model loaded');
+    }
 
-<canvas id="canvas" style="display:none;"></canvas>
+    // 画像選択イベント
+    document.getElementById('imageInput').addEventListener('change', async (e) => {
+      if (!cvReady) { alert('OpenCV.js がまだ読み込まれていません'); return; }
+      const file = e.target.files[0];
+      if (!file) return;
 
-<div id="log"></div>
+      const img = new Image();
+      img.onload = async function() {
+        const canvas = document.getElementById('canvasOutput');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
 
-<!-- Load OpenCV.js -->
-<script async src="https://docs.opencv.org/4.7.0/opencv.js" onload="cvReady()"></script>
+        let src = cv.imread(canvas);
+        let gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+        cv.threshold(gray, gray, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
 
-<!-- Load TensorFlow.js -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.16.0/dist/tf.min.js"></script>
+        // 輪郭検出
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-<script>
-let model = null;
-let cvOk = false;
+        console.log('Contours found:', contours.size());
+        let digits = [];
 
-function log(t){
-  document.getElementById("log").textContent += t + "\n";
-}
+        for (let i = 0; i < contours.size(); i++) {
+          let cnt = contours.get(i);
+          let rect = cv.boundingRect(cnt);
+          if(rect.width > 5 && rect.height > 5 && rect.width < 50 && rect.height < 50) {
+            // 小さい数字候補
+            digits.push(rect);
+          }
+        }
 
-/* === OpenCV ready === */
-function cvReady(){
-  cvOk = true;
-  log("✔ OpenCV.js ready!");
-}
+        console.log('Total digit candidates:', digits.length);
 
-/* === Load MNIST model === */
-async function loadModel(){
-  log("Loading MNIST model…");
-  model = await tf.loadLayersModel(
-    "https://storage.googleapis.com/learnjs-data/model-builder/mnist/model.json"
-  );
-  log("✔ MNIST model loaded.");
-}
+        // MNIST 用にリサイズして予測
+        if(!model) await loadModel();
 
-/* === Predict digit === */
-function predictDigit(mat){
-  return tf.tidy(() => {
-    // OpenCV Mat → Tensor
-    let img = tf.tensor(mat.data, [mat.rows, mat.cols, 1], "float32");
-    img = img.div(255);
-    img = tf.image.resizeBilinear(img.expandDims(0), [28,28]);
-    let pred = model.predict(img);
-    return pred.argMax(1).dataSync()[0];
-  });
-}
+        for(let i=0;i<digits.length;i++){
+          let r = digits[i];
+          let roi = gray.roi(r);
+          let dst = new cv.Mat();
+          let size = new cv.Size(28,28);
+          cv.resize(roi, dst, size, 0,0, cv.INTER_AREA);
 
-/* === Main === */
-document.getElementById("fileInput").onchange = async function(e){
-  if(!cvOk){
-    log("OpenCV not ready yet.");
-    return;
-  }
-
-  if(!model){
-    await loadModel();
-  }
-
-  let file = e.target.files[0];
-  document.getElementById("preview").src = URL.createObjectURL(file);
-
-  await new Promise(r => setTimeout(r, 50)); // Wait for preview load
-
-  let img = document.getElementById("preview");
-  let canvas = document.getElementById("canvas");
-  let ctx = canvas.getContext("2d");
-
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
-  ctx.drawImage(img, 0, 0);
-
-  let src = cv.imread(canvas);
-  cv.cvtColor(src, src, cv.COLOR_RGBA2GRAY);
-
-  // 閾値処理
-  let bin = new cv.Mat();
-  cv.threshold(src, bin, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-
-  // 輪郭抽出
-  let contours = new cv.MatVector();
-  let hierarchy = new cv.Mat();
-  cv.findContours(bin, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-  log("=== Start OCR ===");
-  log("Found contours: " + contours.size());
-
-  for(let i=0;i<contours.size();i++){
-    let r = cv.boundingRect(contours.get(i));
-    if(r.width < 10 || r.height < 10) continue;
-
-    let digitROI = bin.roi(r);
-    let num = predictDigit(digitROI);
-
-    log(`Digit ${i+1}: (${r.x},${r.y}) → ${num}`);
-
-    digitROI.delete();
-  }
-
-  log("=== End OCR ===");
-
-  src.delete(); bin.delete(); contours.delete(); hierarchy.delete();
-};
-</script>
-</body>
-</html>
+          // TensorFlow 用に正規化
