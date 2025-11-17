@@ -2,138 +2,88 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Picross Precision OCR & Solver</title>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+<title>Picross CNN OCR & Solver</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.9.0/dist/tf.min.js"></script>
 <style>
-body{font-family:Arial,sans-serif;margin:16px;background:#fafafa;}
-canvas{border:1px solid #ccc;margin-top:10px;display:block;}
-#preview,#solution{max-width:95vw;}
-pre{background:#fff;padding:10px;border-radius:6px;margin-top:10px;overflow-x:auto;}
-.small{font-size:13px;color:#555;}
+body{font-family:Arial,sans-serif;margin:16px;}
+canvas{border:1px solid #ccc; display:block;margin-top:10px;}
+pre{background:#f8f8f8;padding:10px;overflow-x:auto;}
 </style>
 </head>
 <body>
-<h2>Picross Precision OCR & Solver</h2>
-<p class="small">スクショをアップロードすると、高精度OCR→ヒント修正→自動解答を描画します。</p>
+<h2>Picross CNN OCR & Solver</h2>
 <input type="file" id="imgInput" accept="image/*">
 <canvas id="preview"></canvas>
 <canvas id="solution"></canvas>
-<pre id="jsonOut">JSON結果はここに表示されます。</pre>
+<pre id="jsonOut">JSON結果はここに表示</pre>
 
 <script>
 const imgInput=document.getElementById('imgInput');
 const preview=document.getElementById('preview');
 const solutionCanvas=document.getElementById('solution');
 const jsonOut=document.getElementById('jsonOut');
-let uploadedImg=null;
+let model=null;
+
+// --- MNIST互換CNNモデルを読み込み ---
+async function loadModel(){
+    model = await tf.loadLayersModel('https://.../mnist_cnn/model.json'); // 適切なモデルURLを指定
+}
+loadModel();
 
 // --- Canvas helper ---
 function makeCanvas(w,h){ const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
 function cropCanvas(src,x,y,w,h){ const c=makeCanvas(w,h); c.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h); return c; }
 
-// --- Image preprocess: Binarize + Noise + Grid removal ---
-function preprocessImage(img,scale=1.5,thresh=160){
-    const cw=Math.round(img.width*scale), ch=Math.round(img.height*scale);
-    const c=makeCanvas(cw,ch);
+// --- 前処理: 二値化＋グリッド線除去 ---
+function preprocessImage(img){
+    const c=makeCanvas(img.width,img.height);
     const ctx=c.getContext('2d');
-    ctx.drawImage(img,0,0,cw,ch);
-    const im=ctx.getImageData(0,0,cw,ch); const d=im.data;
+    ctx.drawImage(img,0,0);
+    const im=ctx.getImageData(0,0,c.width,c.height);
+    const d=im.data;
     for(let i=0;i<d.length;i+=4){
-        const g=(d[i]+d[i+1]+d[i+2])/3;
-        const v=g>thresh?255:0;
+        const v=(d[i]+d[i+1]+d[i+2])/3 > 160 ? 255 : 0;
         d[i]=d[i+1]=d[i+2]=v;
     }
     ctx.putImageData(im,0,0);
 
-    // Grid removal (horizontal & vertical)
-    const thresholdLine=0.95; // 95%ピクセルが黒なら線と判定
+    // グリッド線除去（簡易）
     const w=c.width, h=c.height;
     const data=ctx.getImageData(0,0,w,h);
     const pixels=data.data;
-
-    // Horizontal line removal
+    const threshold=0.95;
+    // 横線
     for(let y=0;y<h;y++){
         let black=0;
-        for(let x=0;x<w;x++){
-            const idx=(y*w+x)*4;
-            if(pixels[idx]<128) black++;
-        }
-        if(black/w>thresholdLine){
-            for(let x=0;x<w;x++){
-                const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255;
-            }
-        }
+        for(let x=0;x<w;x++){ if(pixels[(y*w+x)*4]<128) black++; }
+        if(black/w>threshold){ for(let x=0;x<w;x++){ const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255; } }
     }
-    // Vertical line removal
+    // 縦線
     for(let x=0;x<w;x++){
         let black=0;
-        for(let y=0;y<h;y++){
-            const idx=(y*w+x)*4;
-            if(pixels[idx]<128) black++;
-        }
-        if(black/h>thresholdLine){
-            for(let y=0;y<h;y++){
-                const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255;
-            }
-        }
+        for(let y=0;y<h;y++){ if(pixels[(y*w+x)*4]<128) black++; }
+        if(black/h>threshold){ for(let y=0;y<h;y++){ const idx=(y*w+x)*4; pixels[idx]=pixels[idx+1]=pixels[idx+2]=255; } }
     }
     ctx.putImageData(data,0,0);
     return c;
 }
 
-// --- OCR a single cluster at multiple scales ---
-async function ocrClusterMultiScale(c){
-    const scales=[1.5,2,3];
-    const results=[];
-    for(const s of scales){
-        const canvas=makeCanvas(c.width*s,c.height*s);
-        canvas.getContext('2d').drawImage(c,0,0,canvas.width,canvas.height);
-        try{
-            let res=await Tesseract.recognize(canvas,'eng',{tessedit_char_whitelist:'0123456789', tessedit_pageseg_mode:7});
-            let txt=(res?.data?.text||'').replace(/[^\d]/g,'').trim();
-            if(txt) results.push(txt);
-        }catch(e){ console.error(e); }
+// --- 数字クラスタをCNNで分類 ---
+async function recognizeDigit(cluster){
+    const c28=makeCanvas(28,28);
+    c28.getContext('2d').drawImage(cluster,0,0,28,28);
+    const imgData = c28.getContext('2d').getImageData(0,0,28,28);
+    let arr=[];
+    for(let i=0;i<imgData.data.length;i+=4){
+        arr.push(imgData.data[i]<128 ? 1 : 0);
     }
-    // 最も頻出した結果を返す
-    if(results.length===0) return '';
-    const counts={}; results.forEach(t=>counts[t]=(counts[t]||0)+1);
-    return Object.keys(counts).reduce((a,b)=>counts[a]>=counts[b]?a:b);
+    const tensor=tf.tensor(arr,[1,28,28,1]);
+    const pred=model.predict(tensor);
+    const digit=pred.argMax(-1).dataSync()[0];
+    return digit;
 }
 
-// --- Split digits heuristically ---
-function splitDigitsHeuristic(s,maxVal){
-    if(!s) return [];
-    s=s.replace(/^0+/,''); if(!s) return [];
-    const L=s.length; let best={parts:null,count:999};
-    for(let mask=0;mask<1<<(L-1);mask++){
-        const parts=[]; let cur=s[0];
-        for(let i=0;i<L-1;i++){ if((mask>>i)&1){ parts.push(cur); cur=s[i+1]; }else cur+=s[i+1]; }
-        parts.push(cur);
-        const nums=parts.map(p=>parseInt(p,10)); if(nums.some(n=>isNaN(n)||n<=0||n>maxVal)) continue;
-        if(nums.length<best.count){ best.count=nums.length; best.parts=nums; }
-    }
-    if(!best.parts) return s.split('').map(ch=>parseInt(ch,10)).filter(n=>n>0);
-    return best.parts.map(p=>parseInt(p,10));
-}
-
-// --- Fix hints exceeding cell counts ---
-function fixHints(hints,maxCells){
-    return hints.map(line=>{
-        let newLine=[];
-        for(let n of line){
-            if(n<=0) continue;
-            while(n>maxCells){ newLine.push(maxCells); n-=maxCells; }
-            if(n>0) newLine.push(n);
-        }
-        while(newLine.reduce((a,b)=>a+b,0)>maxCells){
-            const idx=newLine.indexOf(Math.max(...newLine));
-            newLine[idx]-=1;
-        }
-        return newLine;
-    });
-}
-
-// --- Simple solver ---
+// --- Solver（確定マスのみ） ---
 function solvePicross(rows,cols){
     const H=rows.length,W=cols.length;
     const grid=Array.from({length:H},()=>Array(W).fill(null));
@@ -148,7 +98,7 @@ function solvePicross(rows,cols){
     return grid;
 }
 
-// --- Draw solution ---
+// --- 描画 ---
 function renderSolution(grid){
     const H=grid.length,W=grid[0].length;
     solutionCanvas.width=W*20; solutionCanvas.height=H*20;
@@ -164,45 +114,25 @@ function renderSolution(grid){
 }
 
 // --- Main ---
-imgInput.addEventListener('change',ev=>{
+imgInput.addEventListener('change',async ev=>{
     const f=ev.target.files[0]; if(!f) return;
-    uploadedImg=new Image();
-    uploadedImg.onload=async()=>{
-        const bin=preprocessImage(uploadedImg,1.5,160);
+    const img=new Image();
+    img.onload=async()=>{
+        const bin=preprocessImage(img);
         preview.width=bin.width; preview.height=bin.height;
         preview.getContext('2d').drawImage(bin,0,0);
 
-        const H=15,W=15; // 仮のサイズ
-        const rowHintArea=cropCanvas(bin,0,0,Math.floor(bin.width*0.2),bin.height);
-        const colHintArea=cropCanvas(bin,0,0,bin.width,Math.floor(bin.height*0.2));
+        const H=15,W=15; // 仮設定
+        const rows=[],cols=[];
 
-        // --- 行ヒントクラスタ検出 ---
-        const rowClusters=[];
-        const projH=rowHintArea.height/H;
-        for(let i=0;i<H;i++){
-            const y=Math.floor(i*projH);
-            rowClusters.push(cropCanvas(rowHintArea,0,y,rowHintArea.width,Math.ceil(projH)));
-        }
-        const rowOCRs=[];
-        for(const c of rowClusters) rowOCRs.push(await ocrClusterMultiScale(c));
-        const rows_fixed=rowOCRs.map(t=>splitDigitsHeuristic(t,W)).map(r=>fixHints([r],W)[0]);
+        // --- TODO: 縦横投影で数字クラスタ抽出 ---
+        // 各クラスタを recognizeDigit() に渡して行・列配列を作る
 
-        // --- 列ヒントクラスタ検出 ---
-        const colClusters=[];
-        const projW=colHintArea.width/W;
-        for(let i=0;i<W;i++){
-            const x=Math.floor(i*projW);
-            colClusters.push(cropCanvas(colHintArea,x,0,Math.ceil(projW),colHintArea.height));
-        }
-        const colOCRs=[];
-        for(const c of colClusters) colOCRs.push(await ocrClusterMultiScale(c));
-        const cols_fixed=colOCRs.map(t=>splitDigitsHeuristic(t,H)).map(c=>fixHints([c],H)[0]);
-
-        jsonOut.textContent=JSON.stringify({rows:rows_fixed,cols:cols_fixed});
-        const solution=solvePicross(rows_fixed,cols_fixed);
+        jsonOut.textContent=JSON.stringify({rows,cols});
+        const solution=solvePicross(rows,cols);
         renderSolution(solution);
     };
-    uploadedImg.src=URL.createObjectURL(f);
+    img.src=URL.createObjectURL(f);
 });
 </script>
 </body>
